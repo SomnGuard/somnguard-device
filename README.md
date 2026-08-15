@@ -103,9 +103,9 @@ dependencies = [
 #### `Makefile`
 Comandos estándar del repositorio para no memorizar instrucciones.
 
-```makefile
+~~~makefile
 setup:
-	python -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt
+	python -m venv .venv && . .venv/bin/activate && python -m pip install -U pip && python -m pip install -e .
 
 run:
 	python -m app.main
@@ -115,7 +115,7 @@ test:
 
 provision:
 	bash scripts/provision.sh
-```
+~~~
 
 ---
 
