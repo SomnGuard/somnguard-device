@@ -1,0 +1,96 @@
+{
+  "sensitivity": "medium",
+  "camera_resolution": [1280, 720],
+  "camera_fps": 30,
+  "sync_interval_sec": 30,
+  "heartbeat_interval_sec": 30,
+  "buffer_limit_mb": 2048,
+  "retention_days": 7,
+  "detection_thresholds": {
+    "perclos_threshold": 0.25,
+    "blink_rate_threshold": 20,
+    "eye_closure_duration_sec": 2.0,
+    "yawn_threshold": 0.6,
+    "head_nod_threshold": 0.3,
+    "phone_detection_confidence": 0.7,
+    "gaze_deviation_threshold": 30,
+    "belt_detection_confidence": 0.7,
+    "fov_min_face_ratio": 0.02,
+    "fov_max_face_ratio": 0.85,
+    "obstruction_landmark_threshold": 0.3
+  },
+  "sound_patterns": {
+    "AS-01": {
+      "frequency_hz": 800,
+      "duration_sec": 0.5,
+      "repetitions": 1,
+      "interval_sec": 0.0,
+      "loop": false,
+      "volume": 0.5
+    },
+    "AS-02": {
+      "frequency_hz": 950,
+      "duration_sec": 0.4,
+      "repetitions": 2,
+      "interval_sec": 0.2,
+      "loop": false,
+      "volume": 0.6
+    },
+    "AS-03": {
+      "frequency_hz": 1100,
+      "duration_sec": 0.3,
+      "repetitions": 3,
+      "interval_sec": 0.1,
+      "loop": true,
+      "volume": 0.7
+    },
+    "AS-04": {
+      "frequency_hz": 1200,
+      "duration_sec": 2.0,
+      "repetitions": 1,
+      "interval_sec": 0.1,
+      "loop": true,
+      "volume": 0.8
+    },
+    "AS-05": {
+      "frequency_hz": 900,
+      "duration_sec": 0.7,
+      "repetitions": 2,
+      "interval_sec": 0.3,
+      "loop": false,
+      "volume": 0.6
+    },
+    "AS-06": {
+      "frequency_hz": 950,
+      "duration_sec": 0.5,
+      "repetitions": 2,
+      "interval_sec": 0.25,
+      "loop": true,
+      "volume": 0.6
+    },
+    "AS-07": {
+      "frequency_hz": 700,
+      "duration_sec": 1.0,
+      "repetitions": 2,
+      "interval_sec": 1.0,
+      "loop": true,
+      "volume": 0.5
+    },
+    "AS-08": {
+      "frequency_hz": 600,
+      "duration_sec": 0.3,
+      "repetitions": 1,
+      "interval_sec": 0.0,
+      "loop": false,
+      "volume": 0.25
+    },
+    "AS-09": {
+      "frequency_hz": 1000,
+      "duration_sec": 0.5,
+      "repetitions": 2,
+      "interval_sec": 0.1,
+      "loop": false,
+      "volume": 0.7
+    }
+  }
+}
