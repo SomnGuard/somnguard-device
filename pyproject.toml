@@ -14,26 +14,25 @@ dependencies = [
     "httpx>=0.25",
     "mediapipe>=0.10",
 ]
-optional-dependencies = {
-    "dev": [
-        "pytest>=7.4",
-        "pytest-asyncio>=0.21",
-        "pytest-cov>=4.1",
-        "ruff>=0.1",
-        "black>=23.0",
-        "mypy>=1.5",
-    ],
-    "rpi": [
-        "picamera2>=0.3",
-        "RPi.GPIO>=0.7",
-    ],
-    "full": [
-        "aiosqlite>=0.19",
-        "pydantic>=2.5",
-        "pydantic-settings>=2.1",
-        "simpleaudio>=1.0",
-    ],
-}
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=4.1",
+    "ruff>=0.1",
+    "black>=23.0",
+    "mypy>=1.5",
+]
+rpi = [
+    "picamera2>=0.3",
+    "RPi.GPIO>=0.7",
+]
+full = [
+    "aiosqlite>=0.19",
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+    "simpleaudio>=1.0",
+]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

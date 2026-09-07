@@ -12,6 +12,12 @@ from app.analysis.landmarks import FaceLandmarks, LandmarkDetector, get_key_poin
 
 logger = logging.getLogger(__name__)
 
+# Escalamiento AS-09 por obstrucción/FOV (AC-002): alertas a los 5s y 20s,
+# pausa de detección a los 30s (el manager transiciona a ESPERA).
+OBSTRUCTION_ALERT_1_SEC = 5.0
+OBSTRUCTION_ALERT_2_SEC = 20.0
+OBSTRUCTION_PAUSE_SEC = 30.0
+
 
 @dataclass
 class DetectionResult:
@@ -73,7 +79,8 @@ class Detector:
             fov_ok = self._check_fov(landmarks_result)
             obstructed = self._check_obstruction(landmarks_result)
 
-            logger.debug(f"Detector: face_present={face_present}, fov_ok={fov_ok}, obstructed={obstructed}, bbox={landmarks_result.bbox}")
+            logger.debug("Detector: face=%s fov_ok=%s obstructed=%s bbox=%s",
+                         face_present, fov_ok, obstructed, landmarks_result.bbox)
 
         # Gestión de timer de obstrucción
         problem_now = not face_present or not fov_ok or obstructed
@@ -90,7 +97,7 @@ class Detector:
             elapsed = now - self._obstruction_start_time
             
             # Escalamiento: 5s -> primera alerta, 20s -> segunda alerta
-            if self._alert_stage == 0 and elapsed >= 5.0:
+            if self._alert_stage == 0 and elapsed >= OBSTRUCTION_ALERT_1_SEC:
                 events.append({
                     "alert_code": "AS-09",
                     "event_type_id": "EV-SYS-02",
@@ -98,8 +105,8 @@ class Detector:
                 })
                 self._alert_stage = 1
                 self._last_alert_time = now
-                logger.info(f"AS-09 escalamiento 1: {elapsed:.1f}s obstruido")
-            elif self._alert_stage == 1 and elapsed >= 20.0:
+                logger.info("AS-09 escalamiento 1: %.1fs obstruido", elapsed)
+            elif self._alert_stage == 1 and elapsed >= OBSTRUCTION_ALERT_2_SEC:
                 events.append({
                     "alert_code": "AS-09",
                     "event_type_id": "EV-SYS-02",
@@ -107,7 +114,10 @@ class Detector:
                 })
                 self._alert_stage = 2
                 self._last_alert_time = now
-                logger.info(f"AS-09 escalamiento 2: {elapsed:.1f}s obstruido")
+                logger.info("AS-09 escalamiento 2: %.1fs obstruido", elapsed)
+            elif self._alert_stage == 2 and elapsed >= OBSTRUCTION_PAUSE_SEC:
+                # Sin evento nuevo: el manager pausa la detección (ESPERA).
+                logger.debug("Obstrucción %.1fs: corresponde pausa de detección", elapsed)
         else:
             # Todo OK - resetear timer
             if self._obstruction_start_time is not None:
@@ -138,8 +148,27 @@ class Detector:
         h, w = landmarks.image_shape
         _, _, bw, bh = landmarks.bbox
         face_area_ratio = (bw * bh) / (w * h)
-        logger.info(f"FOV check: frame={w}x{h}, bbox={bw}x{bh}, ratio={face_area_ratio:.4f}, min={self._fov_min_face_ratio}, max={self._fov_max_face_ratio}, ok={self._fov_min_face_ratio <= face_area_ratio <= self._fov_max_face_ratio}")
+        logger.debug("FOV: frame=%dx%d bbox=%dx%d ratio=%.4f rango=[%.2f, %.2f]",
+                     w, h, bw, bh, face_area_ratio,
+                     self._fov_min_face_ratio, self._fov_max_face_ratio)
         return self._fov_min_face_ratio <= face_area_ratio <= self._fov_max_face_ratio
+
+    @property
+    def obstruction_elapsed_sec(self) -> float:
+        """Segundos con problema de campo visual (0 si todo OK)."""
+        if self._obstruction_start_time is None:
+            return 0.0
+        return time.monotonic() - self._obstruction_start_time
+
+    @property
+    def needs_detection_pause(self) -> bool:
+        """True si la obstrucción superó 30s: el manager debe pausar (AC-002)."""
+        return self.obstruction_elapsed_sec >= OBSTRUCTION_PAUSE_SEC
+
+    def reset_obstruction(self) -> None:
+        self._obstruction_start_time = None
+        self._last_alert_time = None
+        self._alert_stage = 0
 
     def _check_obstruction(self, landmarks: FaceLandmarks) -> bool:
         key_pts = get_key_points(landmarks.landmarks)
@@ -153,5 +182,5 @@ class Detector:
 
         visibility_ratio = visible_count / total_count if total_count > 0 else 0
         obstructed = visibility_ratio < 0.5
-        logger.info(f"Obstruction check: visibility_ratio={visibility_ratio:.3f}, obstructed={obstructed}")
+        logger.debug("Obstrucción: visibilidad=%.3f obstruido=%s", visibility_ratio, obstructed)
         return obstructed

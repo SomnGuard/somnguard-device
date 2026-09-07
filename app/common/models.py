@@ -71,15 +71,24 @@ class DeviceConfig:
     buffer_limit_mb: int = 2048
     retention_days: int = 7
     detection_thresholds: dict = field(default_factory=dict)
+    volume_scale: float = 1.0
 
 
 @dataclass
 class DeviceIdentity:
     serial_number: str
-    api_key_hash: str
     firmware_version: str
+    api_key_hash: str = ""
+    api_key: Optional[str] = None
     device_id: Optional[str] = None
     state: DeviceState = DeviceState.REGISTRADO
+
+    def has_credentials(self) -> bool:
+        """True si hay device_id real (UUID backend) + api_key para operar."""
+        return bool(self.device_id and not self.device_id.startswith("local-") and self.api_key)
+
+    def is_local_mode(self) -> bool:
+        return not self.has_credentials()
 
 
 @dataclass
@@ -119,11 +128,59 @@ class AlertLog:
 
 @dataclass
 class HeartbeatPayload:
+    """Body de POST /api/v1/devices/{id}/heartbeat (HU-API-006 AC-006).
+
+    Campos exactos del contrato backend: firmware_version, pending_count,
+    free_disk_pct, uptime_s. Los headers X-Device-ID + X-API-Key viajan aparte.
+    """
+
     device_id: str
     firmware_version: str
-    state: DeviceState
-    last_event_id: Optional[str] = None
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    pending_count: int = 0
+    free_disk_pct: int = 100
+    uptime_s: int = 0
+
+    def to_request_dict(self) -> dict:
+        return {
+            "firmware_version": self.firmware_version,
+            "pending_count": max(0, int(self.pending_count)),
+            "free_disk_pct": min(100, max(0, int(self.free_disk_pct))),
+            "uptime_s": max(0, int(self.uptime_s)),
+        }
+
+
+@dataclass
+class SelfRegisterResult:
+    """Resultado de POST /devices/self-register (HU-API-006 AC-009 / ADR-010)."""
+
+    device_id: str
+    status: str
+    api_key: Optional[str] = None
+    claim_code: Optional[str] = None
+    created: bool = False  # True si 201 (con secretos), False si 200 (reintento)
+
+
+# Mapeo estado local (edge) <-> estado backend (HU-API-006 AC-004/AC-006).
+# ESPERA es sub-estado local de presencia: frente al backend el device sigue ACTIVE.
+# ERROR es solo local (fallo hardware irrecuperable en arranque).
+BACKEND_STATUS_TO_LOCAL: dict[str, DeviceState] = {
+    "DEVICE_REGISTERED": DeviceState.REGISTRADO,
+    "DEVICE_ASSIGNED": DeviceState.ASIGNADO,
+    "DEVICE_ACTIVE": DeviceState.ACTIVO,
+    "DEVICE_OFFLINE": DeviceState.OFFLINE,
+    "DEVICE_SUSPENDED": DeviceState.SUSPENDIDO,
+    "DEVICE_RETIRED": DeviceState.RETIRADO,
+}
+
+LOCAL_STATUS_TO_BACKEND: dict[DeviceState, str] = {
+    DeviceState.REGISTRADO: "DEVICE_REGISTERED",
+    DeviceState.ASIGNADO: "DEVICE_ASSIGNED",
+    DeviceState.ACTIVO: "DEVICE_ACTIVE",
+    DeviceState.ESPERA: "DEVICE_ACTIVE",  # sub-estado local de presencia
+    DeviceState.OFFLINE: "DEVICE_OFFLINE",
+    DeviceState.SUSPENDIDO: "DEVICE_SUSPENDED",
+    DeviceState.RETIRADO: "DEVICE_RETIRED",
+}
 
 
 @dataclass

@@ -41,6 +41,11 @@ class SoundPlayer:
     def update_config(self, config: DeviceConfig) -> None:
         self.config = config
 
+    def effective_volume(self, pattern: SoundPattern) -> float:
+        """Volumen del patrón × escala global remota (AC-005), acotado [0, 1]."""
+        scale = getattr(self.config, "volume_scale", 1.0) or 1.0
+        return min(1.0, max(0.0, pattern.volume * scale))
+
     async def play(self, pattern: SoundPattern) -> None:
         await self.stop()
 
@@ -50,6 +55,8 @@ class SoundPlayer:
             await self._play_simpleaudio(pattern)
 
     async def _play_winsound(self, pattern: SoundPattern) -> None:
+        # Nota: winsound.Beep no soporta volumen; la escala global solo aplica
+        # al backend simpleaudio/Linux y al cálculo effective_volume().
         freq = pattern.frequency_hz
         duration_ms = int(pattern.duration_sec * 1000)
 
@@ -103,7 +110,7 @@ class SoundPlayer:
             env = np.ones(tone_samples, dtype=np.float32)
             env[:fade_samples] = np.linspace(0, 1, fade_samples)
             env[-fade_samples:] = np.linspace(1, 0, fade_samples)
-            tone *= env * pattern.volume
+            tone *= env * self.effective_volume(pattern)
 
             audio[offset:offset + tone_samples] = tone
             offset += tone_duration + pattern.interval_sec

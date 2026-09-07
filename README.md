@@ -2,7 +2,9 @@
 
 Software del dispositivo SomnGuard: nodo edge basado en **Raspberry Pi / Windows + cámara USB** que detecta fatiga, somnolencia y microsueños al volante, emite alertas sonoras locales y gestiona estados (Activo/Espera/Offline).
 
-> **Estado actual**: HU-DEVICE-002 ✅ completa (inicialización, cámara, estados, alertas). HU-API-006 en desarrollo (backend).
+> **Estado actual**: HU-DEVICE-002 ✅ completa (inicialización, cámara, estados, heartbeat,
+> self-register, device_config). Backend HU-API-006 ✅ (provisioning/self-register/claim);
+> pendiente HU-API-005 (`GET /devices/{id}/config` — el device la consume cuando exista, con fallback local).
 
 ---
 
@@ -15,64 +17,75 @@ Software del dispositivo SomnGuard: nodo edge basado en **Raspberry Pi / Windows
 
 ---
 
-## Instalación y ejecución
+## Instalación y ejecución paso a paso
 
-### 1. Clonar y entrar
-```bash
+### Paso 1 — Probar en modo local (sin backend ni token)
+
+```powershell
 cd somnguard-device
-```
 
-### 2. Crear entorno virtual e instalar dependencias
-```bash
-# Windows (PowerShell)
-py -m venv .venv
-.venv\Scripts\activate
+py -m venv .venv; .\.venv\Scripts\activate
 py -m pip install -U pip
-pip install opencv-python numpy httpx mediapipe
+pip install opencv-python numpy httpx mediapipe pytest pytest-asyncio
+```
 
+```powershell
 # Linux / Raspberry Pi
-python3 -m venv .venv
-source .venv/bin/activate
+python3 -m venv .venv; source .venv/bin/activate
 pip install -U pip
-pip install opencv-python numpy httpx mediapipe
+pip install opencv-python numpy httpx mediapipe pytest pytest-asyncio
 ```
 
-> **Nota**: `simpleaudio`, `aiosqlite`, `pydantic` son opcionales (se usan cuando HU-API-006 esté lista). En Windows se usa `winsound` nativo.
+> **Nota**: `simpleaudio` (Linux), `aiosqlite`, `pydantic` son opcionales
+> (`pip install -e ".[full]"`). En Windows se usa `winsound` nativo.
+> El cliente backend del device usa solo stdlib (`urllib`), sin `httpx` obligatorio.
 
-### 3. Descargar modelo MediaPipe (solo primera vez)
-```bash
-# Desde la raíz del proyecto
-mkdir -p models
-py -c "
-import urllib.request, os
-url = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task'
-urllib.request.urlretrieve(url, 'models/face_landmarker.task')
-print('Modelo descargado en models/face_landmarker.task')
-"
+Descargar el modelo MediaPipe (solo primera vez):
+
+```powershell
+mkdir models -Force
+py -c "import urllib.request; urllib.request.urlretrieve('https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task','models/face_landmarker.task'); print('OK')"
 ```
 
-### 4. Configurar variables de entorno (opcional)
-```bash
-# Copiar plantilla y editar si necesitas backend real
-cp .env.example .env
-# Editar .env con tus valores:
-# SOMNGUARD_API_URL=http://localhost:8000
-# SOMNGUARD_API_KEY=tu-api-key
-# SOMNGUARD_LOG_LEVEL=INFO
-```
-> Sin `.env` usa defaults: `localhost:8000`, modo local (sin backend).
+Tests (sin cámara ni red):
 
-### 5. Ejecutar
-```bash
-# Opción A: Makefile (si tienes make)
-make run
-
-# Opción B: Directo (Windows/Linux)
-py -m app.main        # Windows
-python3 -m app.main   # Linux
+```powershell
+py -m pytest tests/ -v   # Esperado: 43 passed
 ```
 
-### 6. Ver cámara + landmarks (opcional)
+Primer arranque en modo local:
+
+```powershell
+Copy-Item .env.example .env   # el archivo DEBE llamarse .env (se autocarga)
+py -m app.main
+```
+
+Esperado: `Cámara inicializada` + pitido suave (**AS-08**), `Dispositivo en modo
+local (sin credenciales ni provision token)`, `Dispositivo inicializado en Xs`
+(X < 60) y estado `ESPERA` (sin rostro) o `ACTIVO` (si te ve).
+
+### Paso 2 — Poner el token en el `.env` y arrancar
+
+```powershell
+cd ..\somnguard-device
+# En .env pon:
+#   SOMNGUARD_API_URL=http://localhost:8080   # base backend (sin /api/v1)
+#   SOMNGUARD_PROVISION_TOKEN=<token del paso anterior>   # solo primer arranque
+# Nada más: tras el auto-registro el device opera con device_id + api_key
+# guardados en data/device_identity.json (chmod 600) y deja de usar el token.
+
+py -c "from app.common.config import load_env_config; print('token cargado:', bool(load_env_config()['provision_token']))"
+# Esperado: token cargado: True
+
+py -m app.main
+```
+
+Esperado: `Auto-registro completado: device_id=<uuid> estado=DEVICE_REGISTERED`
+(`201`, trae `api_key + claim_code` una sola vez), estado `ASIGNADO` y heartbeat
+cada 30s. Al reiniciar debe decir `Dispositivo ya registrado` sin más
+`self-register` (reintentos `200` no reexponen la key, ADR-010).
+
+### Ver cámara + landmarks (opcional)
 ```bash
 py preview_camera.py   # Ventana OpenCV con landmarks; ESC para salir
 ```
@@ -83,13 +96,15 @@ py preview_camera.py   # Ventana OpenCV con landmarks; ESC para salir
 
 | AC | Comportamiento |
 |----|----------------|
-| **AC-001** | Arranque <60s → cámara OK → suena **AS-08** (pitido suave); fallo → **AS-09** |
-| **AC-002** | Tapa cámara → **AS-09 a 5s** → **AS-09 a 20s** → 30s → pausa detección (`ESPERA`) |
-| **AC-003** | Rostro detectado → `ACTIVO`; 30s sin rostro → `ESPERA`; rostro vuelve → `ACTIVO` |
-| **AC-004** | Heartbeat 30s; sin red → `OFFLINE`; red vuelve → `ACTIVO`/`ESPERA` |
-| **AC-005** | Config default cargada; merge remoto listo para cuando HU-API-006 exista |
+| **AC-001** | Arranque medido (<60s RNF-1.1, warning si excede) → cámara OK → **AS-08**; fallo → **AS-09** + estado `ERROR`. Modelo visión con fallback degradado (AS-09, reintento c/30s) |
+| **AC-002** | Tapa cámara → **AS-09 a 5s** → **AS-09 a 20s** → 30s → **pausa detección** (`ESPERA` + AS-09). Chequeo FOV multi-frame en arranque |
+| **AC-003** | Rostro detectado → `ACTIVO`; 30s sin rostro (reloj monotónico) → `ESPERA`; rostro vuelve → `ACTIVO` inmediato. Presencia nunca sale de `OFFLINE`/admin |
+| **AC-004** | Heartbeat 30s `POST /api/v1/devices/{id}/heartbeat` (`X-Device-ID + X-API-Key`, body `firmware_version/pending_count/free_disk_pct/uptime_s`); sin red → `OFFLINE` (pausa detección); al volver → `ACTIVO`/`ESPERA`. `SUSPENDIDO`/`RETIRADO` del backend pausan hasta admin |
+| **AC-005** | Config default + override local + `GET .../config` al arrancar y tras cada heartbeat OK (tolerante a 404 hasta HU-API-005); aplica umbrales/sound_patterns/volumen (`volume_scale`)/intervalos; cache en `data/device_config.cache.json` |
+| **AC-006** | `serial_number`: override lab > CPU (`/proc/cpuinfo`/`product_uuid`) > estable persistido. `firmware_version`: env > `VERSION` > `pyproject` (se refresca cada boot). Token solo de `SOMNGUARD_PROVISION_TOKEN` en memoria |
+| **AC-007** | Sin credenciales + token → `POST /devices/self-register` (`X-Provision-Token` + `Idempotency-Key` estable, `{serialNumber, firmwareVersion}`); `201` persiste `device_id + api_key` (chmod 600) y suelta el token; `200` no reexpone key (si se perdió → modo local + aviso de `rotate-key`); reintento en background c/60s |
 
-**Estados**: `REGISTRADO` → `ASIGNADO` → `ACTIVO` ↔ `ESPERA` ↔ `OFFLINE`
+**Estados**: `REGISTRADO` → `ASIGNADO` → `ACTIVO` ↔ `ESPERA` ↔ `OFFLINE` (red); `ESPERA` es sub-estado local (backend lo ve `ACTIVE`). Volátiles (`ACTIVO`/`ESPERA`/`OFFLINE`/`ERROR`) no se restauran tras reinicio.
 
 **Alertas (AS-01..AS-09)**: Parametrizables en `config/device.default.json` (frecuencia, duración, repeticiones, loop, volumen).
 
@@ -101,30 +116,33 @@ py preview_camera.py   # Ventana OpenCV con landmarks; ESC para salir
 somnguard-device/
 ├── app/
 │   ├── common/
-│   │   ├── config.py      # Config + merge remoto
-│   │   ├── models.py      # Tipos: DeviceState, AlertCode, SoundPattern, DeviceConfig
+│   │   ├── config.py      # Config + merge/apply remoto + overrides env
+│   │   ├── models.py      # Tipos + mapping estados edge<->backend (HU-API-006)
 │   │   ├── logging.py
 │   │   └── clock.py
 │   ├── device/
-│   │   ├── identity.py    # Serial único (CPU) + API key hash
-│   │   └── manager.py     # State machine + orquestación
+│   │   ├── identity.py    # Serial/fw estables + device_id/api_key (chmod 600)
+│   │   ├── backend.py     # Cliente stdlib: self-register/heartbeat/config
+│   │   └── manager.py     # State machine + orquestación + boot <60s
 │   ├── capture/
-│   │   └── camera.py      # OpenCV + verificación frames
+│   │   └── camera.py      # OpenCV + verificación frames + fallback backend
 │   ├── analysis/
 │   │   ├── landmarks.py   # MediaPipe FaceLandmarker (468 pts)
-│   │   └── detector.py    # FOV + obstruction + escalamiento 5s/20s
+│   │   └── detector.py    # FOV + obstruction + escalamiento 5s/20s/pausa 30s
 │   ├── monitoring/
-│   │   └── presence.py    # Timeout 30s Activo↔Espera
+│   │   └── presence.py    # Timeout 30s monotónico Activo↔Espera
 │   └── alerting/
-│       └── sound_player.py # winsound (Win) / simpleaudio (Linux)
+│       └── sound_player.py # winsound (Win) / simpleaudio (Linux) + volume_scale
 ├── config/
 │   └── device.default.json # 9 sound_patterns + umbrales
+├── tests/unit/           # 43 tests sin hardware ni red (pytest)
 ├── models/
 │   └── face_landmarker.task  # (no versionado, descargar)
+├── VERSION               # firmware_version (fuente tras env)
 ├── preview_camera.py       # Test visual cámara + landmarks
 ├── pyproject.toml
 ├── Makefile
-├── .gitignore
+├── .gitignore (.env y data/ excluidos: secretos fuera del repo)
 ├── .env.example
 ├── README.md
 └── LICENSE
@@ -132,15 +150,26 @@ somnguard-device/
 
 ---
 
-## Próximos pasos (cuando HU-API-006 esté lista)
+## Tests
 
-1. `pip install -e ".[full]"` (instala `aiosqlite`, `pydantic`, `simpleaudio`)
-2. Backend real responde:
-   - `POST /devices/register` → `device_id` real
-   - `GET /devices/{id}/config` → `device_config` remoto (umbrales, sonidos, intervalos)
-   - `POST /devices/{id}/heartbeat` → heartbeat real
-   - `POST /telemetry/events` + `GET /devices/{id}/config` → sync automático
-3. **Cero cambios de código** — `manager.py` ya tiene stubs listos.
+```bash
+py -m pytest tests/ -v   # 43 tests: presencia, escalamiento AS-09, config,
+                         # .env, identidad/credenciales, contratos HTTP, estados
+```
+
+Sin cámara ni red: dependencias pesadas (`cv2`/`mediapipe`) con stubs en
+`tests/unit/conftest.py`.
+
+---
+
+## Próximos pasos (HU-API-005 pendiente en backend)
+
+1. Backend expone `GET /devices/{id}/config` → el device la consume **sin cambios
+   de código** (`backend.py` hoy tolera el 404 y usa config local + override).
+2. `HU-DEVICE-003` informará `pending_count` real en el heartbeat y hará pull de
+   config tras cada sync de telemetría (el hook `_pull_remote_config` ya existe).
+3. `pip install -e ".[full]"` para `simpleaudio` en Linux (volumen real;
+   `winsound` en Windows no soporta volumen).
 
 ---
 

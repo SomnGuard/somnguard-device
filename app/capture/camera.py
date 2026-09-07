@@ -36,8 +36,21 @@ class Camera:
 
     def _open_camera(self) -> cv2.VideoCapture:
         import sys
-        backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_V4L2
-        cap = cv2.VideoCapture(0, backend)
+        backends = []
+        if sys.platform == "win32":
+            backends = [getattr(cv2, "CAP_DSHOW", 0), 0]
+        else:
+            backends = [getattr(cv2, "CAP_V4L2", 0), 0]
+        cap = None
+        for backend in dict.fromkeys(backends):
+            try:
+                cap = cv2.VideoCapture(0, backend) if backend else cv2.VideoCapture(0)
+            except Exception:
+                continue
+            if cap.isOpened():
+                break
+        if cap is None:
+            cap = cv2.VideoCapture(0)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.resolution[0])
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.resolution[1])
         cap.set(cv2.CAP_PROP_FPS, self.config.fps)
