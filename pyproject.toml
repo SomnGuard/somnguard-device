@@ -1,0 +1,66 @@
+[project]
+name = "somnguard-device"
+version = "0.1.0"
+description = "SomnGuard Edge Device - Detección de somnolencia y fatiga en Raspberry Pi"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "SomnGuard Team", email = "team@somnguard.example.com"}
+]
+dependencies = [
+    "opencv-python>=4.8",
+    "numpy>=1.24",
+    "httpx>=0.25",
+    "mediapipe>=0.10",
+]
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=4.1",
+    "ruff>=0.1",
+    "black>=23.0",
+    "mypy>=1.5",
+]
+rpi = [
+    "picamera2>=0.3",
+    "RPi.GPIO>=0.7",
+]
+full = [
+    "aiosqlite>=0.19",
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+    "simpleaudio>=1.0",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+select = ["E", "F", "I", "UP", "W"]
+ignore = ["E501"]
+fix = true
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
