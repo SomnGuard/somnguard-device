@@ -170,7 +170,8 @@ def test_self_register_201_persists_and_assigns(monkeypatch, tmp_path):
         assert ok is True
         assert mgr.ctx.identity.device_id == "11111111-2222-3333-4444-555555555555"
         assert mgr.ctx.identity.api_key == "key-abc"
-        assert mgr.ctx.current_state == DeviceState.ASIGNADO
+        # ASIGNADO ya no existe local (corrección 2026-09-12): queda REGISTRADO hasta face_check
+        assert mgr.ctx.current_state == DeviceState.REGISTRADO
         assert mgr.ctx.backend_available is True
 
     run(scenario())

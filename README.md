@@ -3,8 +3,7 @@
 Software del dispositivo SomnGuard: nodo edge basado en **Raspberry Pi / Windows + cámara USB** que detecta fatiga, somnolencia y microsueños al volante, emite alertas sonoras locales y gestiona estados (Activo/Espera/Offline).
 
 > **Estado actual**: HU-DEVICE-002 ✅ completa (inicialización, cámara, estados, heartbeat,
-> self-register, device_config). Backend HU-API-006 ✅ (provisioning/self-register/claim);
-> pendiente HU-API-005 (`GET /devices/{id}/config` — el device la consume cuando exista, con fallback local).
+> self-register, device_config). Backend HU-API-006 ✅; pendiente HU-API-005 (`GET /config` con fallback local).
 
 ---
 
@@ -12,83 +11,76 @@ Software del dispositivo SomnGuard: nodo edge basado en **Raspberry Pi / Windows
 
 - Python 3.11+
 - Cámara USB (índice 0) o CSI (Raspberry Pi)
-- Parlante/buzzer (para alertas AS-01..AS-09)
+- Parlante (AS-01..AS-09)
 - Windows 10/11, Linux o Raspberry Pi OS
 
 ---
 
-## Instalación y ejecución paso a paso
+## Inicio desde 0 — en 5 minutos (para devs)
 
-### Paso 1 — Probar en modo local (sin backend ni token)
+### 0) Preparar entorno (una vez)
 
 ```powershell
 cd somnguard-device
-
 py -m venv .venv; .\.venv\Scripts\activate
 py -m pip install -U pip
-pip install opencv-python numpy httpx mediapipe pytest pytest-asyncio
+pip install opencv-python numpy mediapipe pytest pytest-asyncio
+# httpx opcional: el device usa urllib (stdlib)
 ```
 
-```powershell
-# Linux / Raspberry Pi
+```bash
+# Linux / RPi
 python3 -m venv .venv; source .venv/bin/activate
 pip install -U pip
-pip install opencv-python numpy httpx mediapipe pytest pytest-asyncio
+pip install opencv-python numpy mediapipe pytest pytest-asyncio
 ```
 
-> **Nota**: `simpleaudio` (Linux), `aiosqlite`, `pydantic` son opcionales
-> (`pip install -e ".[full]"`). En Windows se usa `winsound` nativo.
-> El cliente backend del device usa solo stdlib (`urllib`), sin `httpx` obligatorio.
-
-Descargar el modelo MediaPipe (solo primera vez):
-
+Descargar modelo (una vez, ~15MB):
 ```powershell
 mkdir models -Force
 py -c "import urllib.request; urllib.request.urlretrieve('https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task','models/face_landmarker.task'); print('OK')"
 ```
 
-Tests (sin cámara ni red):
-
+Verificar sin hardware:
 ```powershell
-py -m pytest tests/ -v   # Esperado: 43 passed
+py -m pytest tests/ -v  # 43 passed
 ```
 
-Primer arranque en modo local:
+### 1) Modo local — sin backend ni token (prueba cámara y estados)
 
 ```powershell
-Copy-Item .env.example .env   # el archivo DEBE llamarse .env (se autocarga)
+Copy-Item .env.example .env   # DEBE llamarse .env
 py -m app.main
 ```
 
-Esperado: `Cámara inicializada` + pitido suave (**AS-08**), `Dispositivo en modo
-local (sin credenciales ni provision token)`, `Dispositivo inicializado en Xs`
-(X < 60) y estado `ESPERA` (sin rostro) o `ACTIVO` (si te ve).
+**Qué pasa:** `Cámara inicializada` + `AS-08` (ok) o `AS-09`+`ERROR` si falla. Crea `data/device_identity.json` **solo la primera vez** con `serial` (`dev-...` estable) y `firmware` `0.2.0`. Log: `Dispositivo en modo local (sin credenciales...)`, `inicializado en Xs (<60)` y queda `ACTIVO` (te ve) o `ESPERA` (sin rostro). Tapa cámara → `AS-09` a `5s` y `20s`, a `30s` pausa a `ESPERA` (una sola vez, no re-dispara hasta despejar). Sin rostro `30s` → `ESPERA`, vuelve rostro → `ACTIVO` inmediato. Sin backend sigue detectando (offline-first, no pausa).
 
-### Paso 2 — Poner el token en el `.env` y arrancar
+Parar: `Ctrl+C`.
+
+### 2) Con backend — auto-registro con token (una sola vez)
+
+En `.env` pon:
+```
+SOMNGUARD_API_URL=http://localhost:8080   # sin /api/v1
+SOMNGUARD_PROVISION_TOKEN=<token de POST /devices/provisioning-tokens>
+```
 
 ```powershell
-cd ..\somnguard-device
-# En .env pon:
-#   SOMNGUARD_API_URL=http://localhost:8080   # base backend (sin /api/v1)
-#   SOMNGUARD_PROVISION_TOKEN=<token del paso anterior>   # solo primer arranque
-# Nada más: tras el auto-registro el device opera con device_id + api_key
-# guardados en data/device_identity.json (chmod 600) y deja de usar el token.
-
-py -c "from app.common.config import load_env_config; print('token cargado:', bool(load_env_config()['provision_token']))"
-# Esperado: token cargado: True
-
+py -c "from app.common.config import load_env_config; print(bool(load_env_config()['provision_token']))"  # True
 py -m app.main
 ```
 
-Esperado: `Auto-registro completado: device_id=<uuid> estado=DEVICE_REGISTERED`
-(`201`, trae `api_key + claim_code` una sola vez), estado `ASIGNADO` y heartbeat
-cada 30s. Al reiniciar debe decir `Dispositivo ya registrado` sin más
-`self-register` (reintentos `200` no reexponen la key, ADR-010).
+**Qué pasa:** usa `serial`+`firmware` del archivo ya creado + `X-Provision-Token` → `POST /api/v1/devices/self-register` (`201` trae `device_id+api_key` **una sola vez**). Guarda `device_id+api_key` en `data/device_identity.json` (`chmod 600`) y **deja de usar el token**. Log: `Auto-registro completado: device_id=<uuid>`. Luego `heartbeat` cada `30s`.
 
-### Ver cámara + landmarks (opcional)
-```bash
-py preview_camera.py   # Ventana OpenCV con landmarks; ESC para salir
-```
+Reinicia: `Dispositivo ya registrado: <uuid>` y **no** vuelve a hacer `self-register` (`200` no reexpone key, ADR-010). Si cambia el token en `.env` ya no lo usa (tiene credencial).
+
+¿Token nuevo? Borra `data/device_identity.json` y repite paso 1.
+
+### 3) Verificar
+
+- **Cámara tapada al arrancar:** no suena inmediato, inicia contador `5/20/30` igual que en marcha → `5s AS-09`, `20s AS-09`, `30s` pausa a `ESPERA` + `AS-09` (solo una vez).
+- **Offline:** corta backend → `Sin conectividad: modo OFFLINE (detección local continúa)` y sigue detectando; vuelve backend → próximo `heartbeat` → `Conectividad restaurada: OFFLINE -> ACTIVO/ESPERA`.
+- **Opcional cámara:** `py preview_camera.py` (ESC sale).
 
 ---
 
@@ -96,17 +88,17 @@ py preview_camera.py   # Ventana OpenCV con landmarks; ESC para salir
 
 | AC | Comportamiento |
 |----|----------------|
-| **AC-001** | Arranque medido (<60s RNF-1.1, warning si excede) → cámara OK → **AS-08**; fallo → **AS-09** + estado `ERROR`. Modelo visión con fallback degradado (AS-09, reintento c/30s) |
-| **AC-002** | Tapa cámara → **AS-09 a 5s** → **AS-09 a 20s** → 30s → **pausa detección** (`ESPERA` + AS-09). Chequeo FOV multi-frame en arranque |
-| **AC-003** | Rostro detectado → `ACTIVO`; 30s sin rostro (reloj monotónico) → `ESPERA`; rostro vuelve → `ACTIVO` inmediato. Presencia nunca sale de `OFFLINE`/admin |
-| **AC-004** | Heartbeat 30s `POST /api/v1/devices/{id}/heartbeat` (`X-Device-ID + X-API-Key`, body `firmware_version/pending_count/free_disk_pct/uptime_s`); sin red → `OFFLINE` (pausa detección); al volver → `ACTIVO`/`ESPERA`. `SUSPENDIDO`/`RETIRADO` del backend pausan hasta admin |
-| **AC-005** | Config default + override local + `GET .../config` al arrancar y tras cada heartbeat OK (tolerante a 404 hasta HU-API-005); aplica umbrales/sound_patterns/volumen (`volume_scale`)/intervalos; cache en `data/device_config.cache.json` |
-| **AC-006** | `serial_number`: override lab > CPU (`/proc/cpuinfo`/`product_uuid`) > estable persistido. `firmware_version`: env > `VERSION` > `pyproject` (se refresca cada boot). Token solo de `SOMNGUARD_PROVISION_TOKEN` en memoria |
-| **AC-007** | Sin credenciales + token → `POST /devices/self-register` (`X-Provision-Token` + `Idempotency-Key` estable, `{serialNumber, firmwareVersion}`); `201` persiste `device_id + api_key` (chmod 600) y suelta el token; `200` no reexpone key (si se perdió → modo local + aviso de `rotate-key`); reintento en background c/60s |
+| **AC-001** | Boot `<60s` → cámara OK `AS-08`, fallo `AS-09`+`ERROR`. Modelo con fallback `AS-09` reintento `30s` |
+| **AC-002** | Obstrucción/FOV malo → `AS-09 5s` → `AS-09 20s` → `30s` pausa `ESPERA`+`AS-09` (una vez). Arranque con cámara tapada inicia mismo contador, no inmediato |
+| **AC-003** | `ACTIVO` (rostro) ↔ `ESPERA` (30s sin rostro, reloj monotónico) ↔ `ACTIVO` inmediato. Nunca sale de `OFFLINE`/`SUSPENDIDO` por presencia |
+| **AC-004** | `heartbeat 30s POST /devices/{id}/heartbeat` (`X-Device-ID/X-API-Key` `firmware/pending/free_disk/uptime`); sin red → `OFFLINE` (sigue detectando, offline-first); al volver → `ACTIVO/ESPERA`. `SUSPENDIDO/RETIRADO` pausan hasta admin |
+| **AC-005** | `device_config` = default `config/device.default.json` + override `data/device_config.override.json` + `GET /config` al arrancar y tras `heartbeat` (tolerante `404`). Aplica umbrales/volumen/intervalos, cache `data/device_config.cache.json` |
+| **AC-006** | `serial` estable `dev-...` (solo primera vez), `firmware` `VERSION`/`pyproject` (se refresca si cambia). Token solo en memoria `SOMNGUARD_PROVISION_TOKEN` |
+| **AC-007** | Sin `device_id/api_key` + token → `POST /self-register` (`X-Provision-Token`+`Idempotency-Key` estable `{serial,fw}`); `201` persiste `device_id/api_key` `600`; `200` no reexpone key; retry boot `2x` + background `60s` |
 
-**Estados**: `REGISTRADO` → `ASIGNADO` → `ACTIVO` ↔ `ESPERA` ↔ `OFFLINE` (red); `ESPERA` es sub-estado local (backend lo ve `ACTIVE`). Volátiles (`ACTIVO`/`ESPERA`/`OFFLINE`/`ERROR`) no se restauran tras reinicio.
+**Estados (device no sabe si está asignado):** `REGISTRADO` → `ACTIVO` ↔ `ESPERA` ↔ `OFFLINE` (red); backend ve `ESPERA` como `ACTIVE`. Solo `SUSPENDIDO`/`RETIRADO` vienen de backend. Volátiles no se restauran.
 
-**Alertas (AS-01..AS-09)**: Parametrizables en `config/device.default.json` (frecuencia, duración, repeticiones, loop, volumen).
+**Alertas AS-01..AS-09:** en `config/device.default.json`.
 
 ---
 

@@ -164,13 +164,16 @@ def _parse_state(value: object) -> DeviceState:
 
 
 def load_or_create_identity() -> DeviceIdentity:
-    load_dotenv()  # el serial/fw del .env deben verse antes de leer el entorno
-    env = load_env_config()
-    serial = get_serial_number()
-    firmware = get_firmware_version()
-    env_api_key = (env.get("api_key", "") or "").strip()
-    env_device_id = (env.get("device_id", "") or "").strip()
+    """Carga identidad persistida o la crea solo la primera vez (AC-006/AC-007).
 
+    Corrección 2026-09-12: el archivo ``device_identity.json`` se crea **solo
+    si no existe**. En arranques siguientes se preservan exactamente
+    ``serial_number``, ``firmware_version``, ``device_id`` y ``api_key`` del
+    archivo; no se regeneran ni se pisan con el hardware/env. Solo
+    ``save_credentials`` / ``update_state`` modifican el archivo tras un
+    auto-registro exitoso o una transición (el token nunca se persiste).
+    """
+    load_dotenv()
     path = identity_file()
     if path.exists():
         try:
@@ -179,37 +182,37 @@ def load_or_create_identity() -> DeviceIdentity:
         except (OSError, ValueError) as e:
             logger.warning("Identidad local ilegible (%s); se recrea sin credenciales", e)
             data = {}
-        # El serial de laboratorio puede cambiar por env; el de hardware manda
-        # salvo override explícito.
-        persisted_serial = data.get("serial_number") or serial
-        if os.getenv("SOMNGUARD_SERIAL_NUMBER"):
-            persisted_serial = serial
+        # Preservar serial/device_id/api_key del archivo (solo primera vez se generan).
+        # Firmware sí se refresca si el software cambió (AC-006), pero sin pisar los demás campos.
+        serial = data.get("serial_number") or get_serial_number()
+        current_firmware = get_firmware_version()
+        firmware = data.get("firmware_version") or current_firmware
+        needs_save = False
+        if current_firmware != firmware:
+            firmware = current_firmware
+            needs_save = True
         identity = DeviceIdentity(
-            serial_number=persisted_serial,
-            firmware_version=firmware,  # siempre fresca del software actual
+            serial_number=serial,
+            firmware_version=firmware,
             api_key_hash=data.get("api_key_hash", ""),
             api_key=data.get("api_key") or None,
             device_id=data.get("device_id"),
             state=_parse_state(data.get("state", DeviceState.REGISTRADO.value)),
         )
-        changed = False
-        # Migración: antes solo se guardaba el hash; si el env trae la key real,
-        # se adopta para poder operar (una vez guardada, manda el archivo).
-        if not identity.api_key and env_api_key:
-            identity.api_key = env_api_key
-            identity.api_key_hash = hash_api_key(env_api_key)
-            if env_device_id and not identity.device_id:
-                identity.device_id = env_device_id
-            changed = True
-        elif identity.api_key and not identity.api_key_hash:
+        # Migración puntual: si existe api_key pero falta su hash, completarlo
+        if identity.api_key and not identity.api_key_hash:
             identity.api_key_hash = hash_api_key(identity.api_key)
-            changed = True
-        if identity.firmware_version != data.get("firmware_version"):
-            changed = True
-        if changed:
+            needs_save = True
+        if needs_save:
             save_identity(identity)
         return identity
 
+    # Primera vez: generar serial/fw del hardware/software y crear archivo
+    env = load_env_config()
+    serial = get_serial_number()
+    firmware = get_firmware_version()
+    env_api_key = (env.get("api_key", "") or "").strip()
+    env_device_id = (env.get("device_id", "") or "").strip()
     identity = DeviceIdentity(
         serial_number=serial,
         firmware_version=firmware,
@@ -219,6 +222,7 @@ def load_or_create_identity() -> DeviceIdentity:
         state=DeviceState.REGISTRADO,
     )
     save_identity(identity)
+    logger.info("Identidad creada por primera vez: serial=%s firmware=%s", serial, firmware)
     return identity
 
 
@@ -226,20 +230,20 @@ def save_credentials(identity: DeviceIdentity, device_id: str, api_key: str) -> 
     """Persiste device_id + api_key tras self-register 201 (AC-007).
 
     A partir de aquí el device opera con la API key y deja de usar el token.
+    No se cambia a ASIGNADO: el device no sabe si está asignado al usuario
+    (corrección 2026-09-12: ASIGNADO es solo backend, local va REGISTRADO→ACTIVO/ESPERA).
     """
     identity.device_id = device_id
     identity.api_key = api_key
     identity.api_key_hash = hash_api_key(api_key)
-    if identity.state == DeviceState.REGISTRADO:
-        identity.state = DeviceState.ASIGNADO
+    # No transición a ASIGNADO — el estado lo decide presencia/heartbeat
     save_identity(identity)
     return identity
 
 
 def update_device_id(identity: DeviceIdentity, device_id: str) -> DeviceIdentity:
     identity.device_id = device_id
-    if identity.state == DeviceState.REGISTRADO:
-        identity.state = DeviceState.ASIGNADO
+    # Sin ASIGNADO local
     save_identity(identity)
     return identity
 

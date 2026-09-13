@@ -210,10 +210,18 @@ class DeviceManager:
                 loop.create_task(self._transition_to(DeviceState.ESPERA))
 
     async def _initial_face_check(self) -> None:
-        """Chequeo inicial multi-frame de rostro y campo visual (AC-002/AC-003)."""
+        """Chequeo inicial multi-frame de rostro y campo visual (AC-002/AC-003).
+
+        Corrección 2026-09-12 v2: si la cámara está tapada/obstruida al arrancar
+        NO suena inmediato; se inicia el timer de obstrucción para que el
+        escalamiento sea idéntico al runtime: AS-09 a 5s, AS-09 a 20s, pausa a 30s
+        (y AS-09 una vez al pausar). Error de HW (sin cámara/detector) sí suena
+        inmediato.
+        """
         if not self.ctx.camera or not self.ctx.detector or not self.ctx.detect_available:
             logger.info("Chequeo inicial omitido (cámara/detector no disponible); estado ESPERA")
             self.ctx.presence.mark_absent()
+            await self._play_error_alert()
             await self._transition_to(DeviceState.ESPERA)
             return
         faces = 0
@@ -231,27 +239,37 @@ class DeviceManager:
                 if not result.fov_ok:
                     fov_bad += 1
         if tried == 0:
-            logger.warning("Chequeo inicial sin frames; estado ESPERA")
+            logger.warning("Chequeo inicial sin frames (cámara tapada/desconectada); inicia timer 5/20/30 — permanece ACTIVO para escalamiento")
             self.ctx.presence.mark_absent()
-            await self._transition_to(DeviceState.ESPERA)
+            if self.ctx.detector and self.ctx.detector._obstruction_start_time is None:
+                self.ctx.detector._obstruction_start_time = time.monotonic()
+                self.ctx.detector._alert_stage = 0
+            await self._transition_to(DeviceState.ACTIVO)
             return
         if faces > 0:
             if fov_bad:
-                logger.warning("Campo visual deficiente en arranque (mala posición/obstrucción); "
-                               "se inicia en ACTIVO con escalamiento AS-09")
+                logger.warning("Campo visual deficiente en arranque (mala posición/obstrucción %d/%d); "
+                               "se inicia en ACTIVO — escalamiento 5/20/30 activo", fov_bad, tried)
+                if self.ctx.detector and self.ctx.detector._obstruction_start_time is None:
+                    self.ctx.detector._obstruction_start_time = time.monotonic()
+                    self.ctx.detector._alert_stage = 0
             self.ctx.presence.mark_present()
             await self._transition_to(DeviceState.ACTIVO)
         else:
+            logger.warning("Campo visual obstruido al arrancar (sin rostro %d/%d frames) — inicia timer 5/20/30, permanece ACTIVO", tried, INITIAL_FACE_CHECK_FRAMES)
             self.ctx.presence.mark_absent()
-            await self._transition_to(DeviceState.ESPERA)
+            if self.ctx.detector and self.ctx.detector._obstruction_start_time is None:
+                self.ctx.detector._obstruction_start_time = time.monotonic()
+                self.ctx.detector._alert_stage = 0
+            await self._transition_to(DeviceState.ACTIVO)
 
     # -- registro / provisioning (AC-007) --------------------------------
     async def _register_device(self) -> None:
         if self.ctx.identity.has_credentials():
             logger.info("Dispositivo ya registrado: %s", self.ctx.identity.device_id)
             self.ctx.backend_available = True
-            if self.ctx.current_state == DeviceState.REGISTRADO:
-                await self._transition_to(DeviceState.ASIGNADO)
+            # No ASIGNADO local: el device no sabe si está asignado (solo backend)
+            # Queda REGISTRADO hasta _initial_face_check decida ACTIVO/ESPERA
             return
 
         provision_token = (self.ctx.env_config.get("provision_token", "") or "").strip()
@@ -299,7 +317,7 @@ class DeviceManager:
             # 201: persiste device_id + api_key seguro y deja de usar el token.
             self.ctx.identity = save_credentials(self.ctx.identity, device_id, parsed["api_key"])
             self.ctx.backend_available = True
-            await self._transition_to(DeviceState.ASIGNADO)
+            # Sin ASIGNADO local — queda REGISTRADO hasta face_check
             logger.info("Auto-registro completado: device_id=%s estado=%s",
                         device_id, parsed["status"])
             return True
@@ -308,7 +326,6 @@ class DeviceManager:
             logger.info("Self-register idempotente (200): credenciales locales vigentes, device_id=%s",
                         self.ctx.identity.device_id)
             self.ctx.backend_available = True
-            await self._transition_to(DeviceState.ASIGNADO)
             return True
         logger.error("Self-register idempotente (200) sin api_key local: el reintento no "
                      "reexpone la key (ADR-010); se requiere rotación administrativa "
@@ -322,8 +339,7 @@ class DeviceManager:
                 self.ctx.identity, f"local-{self.ctx.identity.serial_number}")
         self.ctx.backend_available = False
         logger.info("Dispositivo en modo local (%s): %s", reason, self.ctx.identity.device_id)
-        if self.ctx.current_state == DeviceState.REGISTRADO:
-            await self._transition_to(DeviceState.ASIGNADO)
+        # Sin ASIGNADO local
 
     # -- config remota (AC-005) ------------------------------------------
     async def _pull_remote_config(self, reason: str) -> bool:
@@ -391,19 +407,30 @@ class DeviceManager:
             logger.debug("No se pudo persistir estado: %s", e)
 
     async def _enter_offline(self, reason: str) -> None:
+        # Corrección 2026-09-12 (offline-first): OFFLINE ya NO pausa la detección.
+        # Solo cambia el modo (backend_available=False) y mantiene el monitoreo local
+        # con buffer offline. La captura continúa en ACTIVO/OFFLINE.
+        self.ctx.backend_available = False
         if self.ctx.current_state in (DeviceState.ACTIVO, DeviceState.ESPERA):
             self.ctx.pre_offline_state = self.ctx.current_state
             await self._transition_to(DeviceState.OFFLINE)
-            logger.warning("Sin conectividad (%s): detección pausada, estado OFFLINE", reason)
+            logger.warning("Sin conectividad (%s): modo OFFLINE (detección local continúa, sin backend)", reason)
+        elif self.ctx.current_state == DeviceState.OFFLINE:
+            logger.debug("Sigue sin conectividad (%s): permanece OFFLINE (monitoreo local activo)", reason)
+        else:
+            # Si estaba en ASIGNADO/REGISTRADO y falla heartbeat (raro), solo marcar flag
+            logger.info("Sin conectividad (%s): permanece %s (backend no disponible, monitoreo sigue)", reason, self.ctx.current_state.value)
 
     async def _recover_from_offline(self) -> None:
-        if self.ctx.current_state == DeviceState.OFFLINE:
-            target = (DeviceState.ACTIVO if self.ctx.presence.face_present
-                      else self.ctx.pre_offline_state)
-            if target not in (DeviceState.ACTIVO, DeviceState.ESPERA):
-                target = DeviceState.ACTIVO if self.ctx.presence.face_present else DeviceState.ESPERA
-            await self._transition_to(target)
-            logger.info("Conectividad restaurada: estado %s", target.value)
+        if self.ctx.current_state != DeviceState.OFFLINE:
+            return
+        # Recuperación robusta: rostro presente -> ACTIVO, sin rostro -> ESPERA
+        # (no usar pre_offline_state para evitar ACTIVO sin rostro)
+        target = DeviceState.ACTIVO if self.ctx.presence.face_present else DeviceState.ESPERA
+        logger.info("Conectividad restaurada (heartbeat OK): OFFLINE -> %s (face_present=%s, pre=%s)",
+                    target.value, self.ctx.presence.face_present,
+                    self.ctx.pre_offline_state.value if hasattr(self.ctx.pre_offline_state, 'value') else self.ctx.pre_offline_state)
+        await self._transition_to(target)
 
     def _apply_backend_status(self, status: Optional[str]) -> None:
         """Mapea el estado reportado por el backend al estado local (AC-004)."""
@@ -448,7 +475,10 @@ class DeviceManager:
             start = time.monotonic()
             try:
                 state = self.ctx.current_state
-                if state in (DeviceState.OFFLINE, DeviceState.SUSPENDIDO,
+                # SUSPENDIDO/RETIRADO/ERROR sí pausan detección (órdenes administrativas).
+                # OFFLINE ya NO pausa — corrección 2026-09-12 (offline-first):
+                # sin backend el device sigue monitoreando y hace buffer local.
+                if state in (DeviceState.SUSPENDIDO,
                              DeviceState.RETIRADO, DeviceState.ERROR):
                     await asyncio.sleep(1.0)
                     continue
@@ -456,13 +486,18 @@ class DeviceManager:
                     await self._maybe_retry_detector()
                     await asyncio.sleep(1.0)
                     continue
-                if state == DeviceState.ACTIVO:
+                # ACTIVO y OFFLINE comparten detección completa (offline-first).
+                if state in (DeviceState.ACTIVO, DeviceState.OFFLINE):
                     frame = await self.ctx.camera.read_frame()
                     if frame is not None:
                         result = await self.ctx.detector.process(frame)
                         await self._handle_detection_result(result)
                         await self._check_obstruction_pause()
                 elif state in (DeviceState.ESPERA, DeviceState.ASIGNADO, DeviceState.REGISTRADO):
+                    frame = await self.ctx.camera.read_frame()
+                    if frame is not None:
+                        face_present = await self.ctx.detector.detect_face_only(frame)
+                        self.ctx.presence.update(face_present)
                     frame = await self.ctx.camera.read_frame()
                     if frame is not None:
                         face_present = await self.ctx.detector.detect_face_only(frame)
@@ -494,13 +529,26 @@ class DeviceManager:
             logger.debug("Reintento de modelo fallido: %s", e)
 
     async def _check_obstruction_pause(self) -> None:
-        """Obstrucción > 30s: AS-09 + pausa de detección (ESPERA) — AC-002."""
+        """Obstrucción > 30s: AS-09 + pausa de detección (ESPERA) — AC-002.
+
+        Corrección 2026-09-12: en OFFLINE no se transiciona fuera de OFFLINE;
+        se alerta una sola vez por episodio (no re-dispara 5/20 hasta que se
+        despeje la obstrucción). Deja lógica anterior para ACTIVO.
+        """
         detector = self.ctx.detector
-        if (detector and detector.needs_detection_pause
-                and self.ctx.current_state == DeviceState.ACTIVO):
+        if not detector or not detector.needs_detection_pause:
+            return
+        if self.ctx.current_state == DeviceState.ACTIVO:
             logger.warning("Campo visual obstruido >30s: pausa de detección (ESPERA)")
             await self._play_error_alert()
             await self._transition_to(DeviceState.ESPERA)
+        elif self.ctx.current_state == DeviceState.OFFLINE:
+            # Solo una vez por episodio para no loopear 5/20 tras pausar
+            if detector._alert_stage == 2:  # 2 = ya avisó a 20s, ahora toca pausa
+                logger.warning("Campo visual obstruido >30s en OFFLINE: AS-09 (sigue monitoreo local)")
+                await self._play_error_alert()
+                detector._alert_stage = 3  # marca pausa notificada, no re-dispara hasta despeje
+            # No reset: se mantiene hasta que detector.process vea cara y resetee solo
 
     async def _handle_detection_result(self, result, frame=None) -> None:
         if isinstance(result, DetectionResult):
@@ -588,10 +636,7 @@ class DeviceManager:
         self._apply_backend_status(parsed["status"])
         if self.ctx.current_state == DeviceState.OFFLINE:
             await self._recover_from_offline()
-        elif self.ctx.current_state == DeviceState.ASIGNADO and parsed["status"] == "DEVICE_ACTIVE":
-            # Primer heartbeat válido posterior a asignación (ADR-010 §4).
-            await self._transition_to(
-                DeviceState.ACTIVO if self.ctx.presence.face_present else DeviceState.ESPERA)
+        # ASIGNADO ya no existe local; el primer heartbeat se maneja vía REGISTRADO→ACTIVO/ESPERA en _initial_face_check
         logger.debug("Heartbeat OK: backend=%s local=%s",
                      parsed["status"], self.ctx.current_state.value)
         await self._pull_remote_config("post-heartbeat")
