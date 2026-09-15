@@ -28,12 +28,14 @@ class DetectionResult:
 
 
 class Detector:
+    # Fallbacks alineados con config/device.default.json (no con valores
+    # antiguos más estrictos: fov_min 0.15 provocaba falsos AS-09 si los
+    # thresholds llegaban vacíos).
     def __init__(self, thresholds: dict[str, Any]):
-        self.thresholds = thresholds
-        self._landmark_detector: Optional[LandmarkDetector] = None
-        self._fov_min_face_ratio = thresholds.get("fov_min_face_ratio", 0.15)
-        self._fov_max_face_ratio = thresholds.get("fov_max_face_ratio", 0.85)
-        self._obstruction_landmark_threshold = thresholds.get("obstruction_landmark_threshold", 0.3)
+        self.thresholds = thresholds or {}
+        self._fov_min_face_ratio = self.thresholds.get("fov_min_face_ratio", 0.02)
+        self._fov_max_face_ratio = self.thresholds.get("fov_max_face_ratio", 0.85)
+        self._obstruction_landmark_threshold = self.thresholds.get("obstruction_landmark_threshold", 0.3)
         
         # Timer de obstrucción para escalamiento
         self._obstruction_start_time: Optional[float] = None
@@ -56,10 +58,10 @@ class Detector:
         logger.info("Detector inicializado con MediaPipe Face Mesh")
 
     def update_thresholds(self, thresholds: dict[str, Any]) -> None:
-        self.thresholds = thresholds
-        self._fov_min_face_ratio = thresholds.get("fov_min_face_ratio", 0.15)
-        self._fov_max_face_ratio = thresholds.get("fov_max_face_ratio", 0.85)
-        self._obstruction_landmark_threshold = thresholds.get("obstruction_landmark_threshold", 0.3)
+        self.thresholds = thresholds or {}
+        self._fov_min_face_ratio = self.thresholds.get("fov_min_face_ratio", 0.02)
+        self._fov_max_face_ratio = self.thresholds.get("fov_max_face_ratio", 0.85)
+        self._obstruction_landmark_threshold = self.thresholds.get("obstruction_landmark_threshold", 0.3)
         logger.debug("Umbrales actualizados")
 
     async def process(self, frame: np.ndarray) -> DetectionResult:

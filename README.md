@@ -92,7 +92,7 @@ Reinicia: `Dispositivo ya registrado: <uuid>` y **no** vuelve a hacer `self-regi
 | **AC-002** | Obstrucción/FOV malo → `AS-09 5s` → `AS-09 20s` → `30s` pausa `ESPERA`+`AS-09` (una vez). Arranque con cámara tapada inicia mismo contador, no inmediato |
 | **AC-003** | `ACTIVO` (rostro) ↔ `ESPERA` (30s sin rostro, reloj monotónico) ↔ `ACTIVO` inmediato. Nunca sale de `OFFLINE`/`SUSPENDIDO` por presencia |
 | **AC-004** | `heartbeat 30s POST /devices/{id}/heartbeat` (`X-Device-ID/X-API-Key` `firmware/pending/free_disk/uptime`); sin red → `OFFLINE` (sigue detectando, offline-first); al volver → `ACTIVO/ESPERA`. `SUSPENDIDO/RETIRADO` pausan hasta admin |
-| **AC-005** | `device_config` = default `config/device.default.json` + override `data/device_config.override.json` + `GET /config` al arrancar y tras `heartbeat` (tolerante `404`). Aplica umbrales/volumen/intervalos, cache `data/device_config.cache.json` |
+| **AC-005** | `device_config` = default `config/device.default.json` → caché `data/device_config.cache.json` (último pull) → override `data/device_config.override.json` + `GET /config` **solo manual** cuando `heartbeat` responde `config_pending=true` (usuario pulsa Actualizar en portal/app). Al arrancar no hace pull: restaura la caché para no revertir a default mientras la API reporta `applied==global`. Aplica umbrales/volumen/intervalos |
 | **AC-006** | `serial` estable `dev-...` (solo primera vez), `firmware` `VERSION`/`pyproject` (se refresca si cambia). Token solo en memoria `SOMNGUARD_PROVISION_TOKEN` |
 | **AC-007** | Sin `device_id/api_key` + token → `POST /self-register` (`X-Provision-Token`+`Idempotency-Key` estable `{serial,fw}`); `201` persiste `device_id/api_key` `600`; `200` no reexpone key; retry boot `2x` + background `60s` |
 
@@ -156,10 +156,8 @@ Sin cámara ni red: dependencias pesadas (`cv2`/`mediapipe`) con stubs en
 
 ## Próximos pasos (HU-API-005 pendiente en backend)
 
-1. Backend expone `GET /devices/{id}/config` → el device la consume **sin cambios
-   de código** (`backend.py` hoy tolera el 404 y usa config local + override).
-2. `HU-DEVICE-003` informará `pending_count` real en el heartbeat y hará pull de
-   config tras cada sync de telemetría (el hook `_pull_remote_config` ya existe).
+1. Backend HU-API-005 ya expone `GET /devices/{id}/config` y `POST /devices/{id}/config/refresh` + `config_pending` en `heartbeat`. El device solo pulla cuando el heartbeat avisa `pending=true` (flujo manual).
+2. `HU-DEVICE-003` informará `pending_count` real en el heartbeat.
 3. `pip install -e ".[full]"` para `simpleaudio` en Linux (volumen real;
    `winsound` en Windows no soporta volumen).
 

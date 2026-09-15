@@ -116,6 +116,17 @@ def merge_configs(base: DeviceConfig, override: dict[str, Any]) -> DeviceConfig:
     # Solo claves conocidas (ignora resto para compatibilidad con API futura).
     override = {k: v for k, v in override.items() if k in REMOTE_CONFIG_KEYS}
 
+    # detection_thresholds se fusiona (no se reemplaza): la API (ADR-011) envía
+    # {} cuando no hay overrides y un reemplazo borraría los umbrales de visión
+    # del default (fov_min_face_ratio, etc.) dejando al Detector con fallbacks
+    # más estrictos -> falsos "FOV deficiente"/AS-09 al arrancar.
+    remote_thresholds = override.get("detection_thresholds", None)
+    if isinstance(remote_thresholds, dict) and remote_thresholds:
+        merged_thresholds = dict(base.detection_thresholds or {})
+        merged_thresholds.update(remote_thresholds)
+    else:
+        merged_thresholds = base.detection_thresholds
+
     config_dict = {
         "sensitivity": override.get("sensitivity", base.sensitivity),
         "camera_resolution": tuple(override.get("camera_resolution", base.camera_resolution)),
@@ -124,7 +135,7 @@ def merge_configs(base: DeviceConfig, override: dict[str, Any]) -> DeviceConfig:
         "heartbeat_interval_sec": override.get("heartbeat_interval_sec", base.heartbeat_interval_sec),
         "buffer_limit_mb": override.get("buffer_limit_mb", base.buffer_limit_mb),
         "retention_days": override.get("retention_days", base.retention_days),
-        "detection_thresholds": override.get("detection_thresholds", base.detection_thresholds),
+        "detection_thresholds": merged_thresholds,
         "volume_scale": override.get("volume_scale", base.volume_scale),
         "sound_patterns": base.sound_patterns.copy(),
     }
@@ -243,6 +254,36 @@ def load_local_override(base: DeviceConfig, data_dir: Path | None = None) -> Dev
         merged, _ = apply_remote_config(base, override)
         return merged
     except (OSError, ValueError):
+        return base
+
+
+def load_cached_remote(base: DeviceConfig, data_dir: Path | None = None) -> DeviceConfig:
+    """Restaura la última config aplicada desde <data_dir>/device_config.cache.json.
+
+    El manager la escribe en cada pull manual exitoso (`_cache_remote_config`).
+    Sin esto, un reinicio volvía a `device.default.json` aunque la API tuviera
+    `applied == global` (ok) y el heartbeat ya no pedía pull: el device quedaba
+    obsoleto para siempre. Si no existe o es inválida, usa base.
+    """
+    directory = Path(data_dir) if data_dir else Path("data")
+    cache_path = directory / "device_config.cache.json"
+    if not cache_path.exists():
+        return base
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            cached = json.load(f)
+    except (OSError, ValueError):
+        return base
+    # Formato escrito por el manager: {"pulled_at": ..., "config": <respuesta API>}.
+    # apply_remote_config ya desenvuelve "config"/"data"/"device_config".
+    if isinstance(cached, dict) and isinstance(cached.get("config"), dict):
+        cached = cached
+    elif not isinstance(cached, dict):
+        return base
+    try:
+        merged, _ = apply_remote_config(base, cached)
+        return merged
+    except (ValueError, TypeError):
         return base
 
 
