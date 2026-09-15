@@ -1,0 +1,54 @@
+# Bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment files
+.env
+.env.local
+
+# Data (runtime)
+data/
+*.db
+*.sqlite
+*.sqlite3
+logs/
+*.log
+
+# Models (pesos)
+models/*.onnx
+models/*.tflite
+models/*.pt
+models/*.pth
+models/*.task
+
+# Packaging
+*.egg-info/
+dist/
+build/
+*.whl
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tests
+.coverage
+htmlcov/
+.pytest_cache/
+*.cover
+
+# Media evidencia (generada en runtime)
+data/media/
