@@ -36,6 +36,7 @@ from app.common.models import (
 )
 from app.common.config import (
     apply_remote_config,
+    load_cached_remote,
     load_default_config,
     load_env_config,
     load_local_override,
@@ -98,7 +99,18 @@ class DeviceManager:
     def __init__(self):
         identity = load_or_create_identity()
         env_config = load_env_config()
-        config = load_local_override(load_default_config(), data_dir())
+        # Orden: default -> caché del último pull manual -> override local.
+        # La caché evita que un reinicio revierta a default mientras la API
+        # reporta applied==global (sin pending) y el device quedaría obsoleto.
+        # El override sigue ganando (ajuste en campo).
+        config = load_local_override(
+            load_cached_remote(load_default_config(), data_dir()), data_dir())
+        try:
+            cache_path = data_dir() / "device_config.cache.json"
+            if cache_path.exists():
+                logger.info("Configuración restaurada desde caché: %s", cache_path)
+        except OSError:
+            pass
         self.ctx = DeviceContext(
             identity=identity,
             config=config,
@@ -125,7 +137,7 @@ class DeviceManager:
         await self._timed("presencia", self._init_presence)
 
         await self._timed("registro", self._register_device)
-        await self._timed("config remota", self._pull_remote_config, "arranque")
+        # Config remota solo manual (pending flag del heartbeat), no en arranque
 
         await self._timed("chequeo inicial", self._initial_face_check)
 
@@ -341,20 +353,31 @@ class DeviceManager:
         logger.info("Dispositivo en modo local (%s): %s", reason, self.ctx.identity.device_id)
         # Sin ASIGNADO local
 
-    # -- config remota (AC-005) ------------------------------------------
+    # -- config remota (AC-005/HU-API-005 manual via pending flag del heartbeat) --
+    # Flujo: PATCH /catalogs/sound-patterns -> global_config.version++ ;
+    # portal muestra outdated vía GET /config/status ; usuario pulsa Actualizar
+    # (POST /devices/{id}/config/refresh -> pending=true) ; el próximo heartbeat
+    # trae configPending=true y aquí se hace GET /config (persiste applied en API).
     async def _pull_remote_config(self, reason: str) -> bool:
         if not self.ctx.identity.has_credentials():
+            logger.warning("GET config omitido (%s): sin credenciales (device_id=%s)",
+                           reason, self.ctx.identity.device_id)
             return False
         try:
             remote = await self.ctx.backend.fetch_config(
                 self.ctx.identity.device_id, self.ctx.identity.api_key)
         except BackendAuthError as e:
-            logger.warning("GET config rechazado (key inválida?): %s", e)
+            logger.warning("GET config rechazado (%s): key inválida o device suspendido/retirado: %s",
+                           reason, e)
             return False
         except BackendError as e:
-            logger.debug("GET config fallido (%s): %s", reason, e)
+            # 500 aquí suele ser la API (ver DeviceConfigService.getEffectiveConfig);
+            # antes era silencioso (debug) y parecía que "solo dice pendiente".
+            logger.warning("GET config fallido (%s): %s", reason, e)
             return False
         if not remote:
+            logger.warning("GET config vacío (%s): backend devolvió 404/None; se usa config local",
+                           reason)
             return False
         merged, changed = apply_remote_config(self.ctx.config, remote)
         if changed:
@@ -366,6 +389,12 @@ class DeviceManager:
                         reason, len(merged.detection_thresholds),
                         len(merged.sound_patterns), merged.volume_scale,
                         merged.heartbeat_interval_sec, merged.sync_interval_sec)
+        else:
+            logger.info("GET config sin cambios aplicables (%s): remote_keys=%s "
+                        "(thresholds/event_sound_map del catálogo se ignoran; "
+                        "solo aplican %s)",
+                        reason, sorted(remote.keys()) if isinstance(remote, dict) else type(remote).__name__,
+                        "detection_thresholds/sound_patterns/volumen/intervalos")
         self.ctx.last_config_pull = time.monotonic()
         return changed
 
@@ -636,10 +665,14 @@ class DeviceManager:
         self._apply_backend_status(parsed["status"])
         if self.ctx.current_state == DeviceState.OFFLINE:
             await self._recover_from_offline()
-        # ASIGNADO ya no existe local; el primer heartbeat se maneja vía REGISTRADO→ACTIVO/ESPERA en _initial_face_check
-        logger.debug("Heartbeat OK: backend=%s local=%s",
-                     parsed["status"], self.ctx.current_state.value)
-        await self._pull_remote_config("post-heartbeat")
+        # Config solo manual: el backend avisa via config_pending en el heartbeat
+        pending = parsed.get("config_pending") or parsed.get("configPending") or parsed.get("pending_config_update")
+        if pending is True or str(pending).lower() == "true":
+            logger.info("Heartbeat avisa config pendiente: pull manual")
+            await self._pull_remote_config("pending-flag")
+        else:
+            logger.debug("Heartbeat OK: backend=%s local=%s pending=%s",
+                         parsed["status"], self.ctx.current_state.value, pending)
 
     async def shutdown(self) -> None:
         logger.info("Apagando dispositivo...")
