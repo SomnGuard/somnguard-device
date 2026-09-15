@@ -1,7 +1,7 @@
 """Cliente HTTP del backend (HU-DEVICE-002 AC-004/005/007).
 
 Solo stdlib (``urllib``) para no acoplar el arranque a dependencias opcionales.
-Contratos implementados (HU-API-006):
+Contratos implementados (HU-API-006 + HU-API-005/ADR-011):
 
 - ``POST /api/v1/devices/self-register`` — headers ``X-Provision-Token`` +
   ``Idempotency-Key``, body ``{serialNumber, firmwareVersion}``.
@@ -9,9 +9,11 @@ Contratos implementados (HU-API-006):
   (secretos una sola vez); reintento ``200`` sin secretos (ADR-010).
 - ``POST /api/v1/devices/{id}/heartbeat`` — headers ``X-Device-ID`` +
   ``X-API-Key``, body ``{firmware_version, pending_count, free_disk_pct,
-  uptime_s}``. Respuesta ``{deviceId, status, lastHeartbeatAt}``.
-- ``GET /api/v1/devices/{id}/config`` — HU-API-005 (aún no implementada en el
-  backend: un ``404`` se trata como "no disponible", sin romper el arranque).
+  uptime_s}``. Respuesta ``{deviceId, status, lastHeartbeatAt,
+  configPending, configVersionAvailable}``.
+- ``GET /api/v1/devices/{id}/config`` — HU-API-005/ADR-011 (config global
+  versionada). Un ``404`` se trata como "no disponible esta vez" (se reintenta
+  en el próximo pull, sin romper el arranque).
 
 Seguridad: ningún secreto se loguea (valores reemplazados por ``***``).
 """
@@ -28,7 +30,10 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 API_PREFIX = "/api/v1"
-CONFIG_ENDPOINT_AVAILABLE = True  # se desactiva tras el primer 404 (HU-API-005 pendiente)
+# Legado HU-API-005 pendiente: antes se desactivaba tras el primer 404.
+# Se conserva por compatibilidad con tests, pero ya NO se desactiva:
+# el endpoint existe (ADR-011) y un 404 solo significa "reintentar luego".
+CONFIG_ENDPOINT_AVAILABLE = True
 
 
 class BackendError(Exception):
@@ -142,9 +147,6 @@ class BackendClient:
         return result.body
 
     def fetch_config_sync(self, device_id: str, api_key: str) -> Optional[dict]:
-        global CONFIG_ENDPOINT_AVAILABLE
-        if not CONFIG_ENDPOINT_AVAILABLE:
-            return None
         try:
             result = _do_request(
                 "GET", self._url(f"/devices/{device_id}/config"),
@@ -154,13 +156,13 @@ class BackendClient:
             )
         except BackendError as e:
             if "404" in str(e):
-                CONFIG_ENDPOINT_AVAILABLE = False
-                logger.info("GET config aún no disponible en backend (HU-API-005 pendiente); se usa config local")
+                logger.info("GET config devolvió 404 para %s; se usa config local y se reintentará",
+                            device_id)
                 return None
             raise
         if result.status == 404:
-            CONFIG_ENDPOINT_AVAILABLE = False
-            logger.info("GET config aún no disponible en backend (HU-API-005 pendiente); se usa config local")
+            logger.info("GET config devolvió 404 para %s; se usa config local y se reintentará",
+                        device_id)
             return None
         if result.status != 200:
             raise BackendError(f"config respondió {result.status}")
@@ -196,4 +198,5 @@ class BackendClient:
             "device_id": _first(body, "deviceId", "device_id"),
             "status": _first(body, "status"),
             "last_heartbeat_at": _first(body, "lastHeartbeatAt", "last_heartbeat_at"),
+            "config_pending": _first(body, "configPending", "config_pending", "pendingConfigUpdate", "pending_config_update"),
         }
