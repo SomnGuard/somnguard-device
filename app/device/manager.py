@@ -62,6 +62,13 @@ from app.analysis.detector import Detector, DetectionResult
 from app.monitoring.presence import PresenceMonitor
 from app.alerting.sound_player import SoundPlayer
 
+try:
+    from app.analysis.pipeline import VisionPipeline
+    HAS_PIPELINE = True
+except Exception:  # pragma: no cover - import ligero siempre disponible
+    VisionPipeline = None  # type: ignore
+    HAS_PIPELINE = False
+
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +88,7 @@ class DeviceContext:
     env_config: dict
     camera: Optional[Camera] = None
     detector: Optional[Detector] = None
+    pipeline: Optional[object] = None  # VisionPipeline HU-DEVICE-001 (None si no disponible)
     presence: Optional[PresenceMonitor] = None
     sound_player: Optional[SoundPlayer] = None
     backend: Optional[BackendClient] = None
@@ -196,6 +204,21 @@ class DeviceManager:
             self.ctx.last_detector_retry = time.monotonic()
             logger.error("No se pudo cargar el modelo de visión (%s); modo degradado", e)
             await self._play_error_alert()
+            return
+        # HU-DEVICE-001: pipeline compone obstruction + somnolencia +
+        # distracción + cinturón sobre el mismo Detector (no duplica modelos).
+        if HAS_PIPELINE:
+            try:
+                pipe = VisionPipeline(self.ctx.config.detection_thresholds)
+                # Reusa el landmarker ya cargado (un solo FaceLandmarker).
+                pipe.obstruction = self.ctx.detector
+                pipe.update_thresholds(self.ctx.config.detection_thresholds)
+                await pipe.load_models()
+                self.ctx.pipeline = pipe
+                logger.info("Pipeline visión HU-DEVICE-001 activo: %s", pipe.models_status)
+            except Exception as e:
+                logger.warning("Pipeline no disponible, solo obstrucción: %s", e)
+                self.ctx.pipeline = None
 
     async def _init_presence(self) -> None:
         timeout = self.ctx.config.detection_thresholds.get("face_absence_timeout_sec", 30)
@@ -413,6 +436,11 @@ class DeviceManager:
     async def _reconfigure_services(self) -> None:
         if self.ctx.detector:
             self.ctx.detector.update_thresholds(self.ctx.config.detection_thresholds)
+        if getattr(self.ctx, "pipeline", None):
+            try:
+                self.ctx.pipeline.update_thresholds(self.ctx.config.detection_thresholds)
+            except Exception:
+                pass
         if self.ctx.sound_player:
             self.ctx.sound_player.update_config(self.ctx.config)
         if self.ctx.camera and self.ctx.config.camera_resolution:
@@ -519,14 +547,16 @@ class DeviceManager:
                 if state in (DeviceState.ACTIVO, DeviceState.OFFLINE):
                     frame = await self.ctx.camera.read_frame()
                     if frame is not None:
-                        result = await self.ctx.detector.process(frame)
-                        await self._handle_detection_result(result)
+                        t_cap = time.monotonic()
+                        if self.ctx.pipeline is not None:
+                            result = await self.ctx.pipeline.process(frame, capture_time=t_cap)
+                        else:
+                            result = await self.ctx.detector.process(frame)
+                        await self._handle_detection_result(result, frame)
                         await self._check_obstruction_pause()
                 elif state in (DeviceState.ESPERA, DeviceState.ASIGNADO, DeviceState.REGISTRADO):
-                    frame = await self.ctx.camera.read_frame()
-                    if frame is not None:
-                        face_present = await self.ctx.detector.detect_face_only(frame)
-                        self.ctx.presence.update(face_present)
+                    # Un solo frame por iteración (corrección HU-DEVICE-001:
+                    # antes leía 2 frames y duplicaba costo de inferencia).
                     frame = await self.ctx.camera.read_frame()
                     if frame is not None:
                         face_present = await self.ctx.detector.detect_face_only(frame)
@@ -580,11 +610,21 @@ class DeviceManager:
             # No reset: se mantiene hasta que detector.process vea cara y resetee solo
 
     async def _handle_detection_result(self, result, frame=None) -> None:
-        if isinstance(result, DetectionResult):
-            self.ctx.presence.update(result.face_present and result.fov_ok)
-            events = result.events
+        # Duck-typing: DetectionResult (HU-DEVICE-002) o PipelineResult
+        # (HU-DEVICE-001) — ambos exponen .events/.face_present/.fov_ok.
+        if hasattr(result, "events"):
+            try:
+                self.ctx.presence.update(bool(result.face_present and result.fov_ok))
+            except Exception:
+                pass
+            events = list(result.events or [])
+            metrics = getattr(result, "metrics", None)
+            if isinstance(metrics, dict) and metrics.get("within_budget") is False:
+                logger.warning("Frame excedió presupuesto RNF-1.2: %s", metrics)
+        elif isinstance(result, dict):
+            events = result.get("events", [])
         else:
-            events = result.get("events", []) if isinstance(result, dict) else []
+            events = []
 
         if not events:
             return
@@ -594,10 +634,22 @@ class DeviceManager:
                 alert_code = AlertCode(event_data.get("alert_code", "AS-01"))
             except ValueError:
                 alert_code = AlertCode.AS_01
-            pattern = get_sound_pattern(self.ctx.config, alert_code)
-            await self.ctx.sound_player.play(pattern)
+            # RNF-1.3: log inmediato (<1s tras confirmación) y sonido en
+            # background para no bloquear el loop de captura.
             logger.info("Evento detectado: %s (%s)",
                         alert_code.value, event_data.get("message", ""))
+            try:
+                loop = asyncio.get_running_loop()
+                pattern = get_sound_pattern(self.ctx.config, alert_code)
+                loop.create_task(self._play_alert_background(pattern, alert_code))
+            except RuntimeError:
+                pass
+
+    async def _play_alert_background(self, pattern, alert_code) -> None:
+        try:
+            await self.ctx.sound_player.play(pattern)
+        except Exception as e:
+            logger.debug("Alerta %s no sonó: %s", alert_code, e)
 
     async def _heartbeat_loop(self) -> None:
         while self.ctx.running:

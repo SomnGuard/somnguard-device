@@ -236,6 +236,56 @@ def _sanitize_config(config: DeviceConfig) -> DeviceConfig:
         config.volume_scale = 1.0
     if not isinstance(config.detection_thresholds, dict):
         config.detection_thresholds = {}
+    th = config.detection_thresholds
+    # Compat aliases legacy -> canónicos Apéndice 2 (HU-DEVICE-001 IT1).
+    # No pisa si el canónico ya existe (el remoto/default nuevo manda).
+    _aliases = {
+        "blink_rate_threshold": ("blink_rate_max", 25),
+        "eye_closure_duration_sec": ("eye_closed_min_sec", 2.0),
+        "yawn_threshold": ("yawn_mar_threshold", 0.75),
+        "head_nod_threshold": ("head_tilt_duration_sec", 3.0),
+        "phone_detection_confidence": ("detection_confidence_min", 0.7),
+        "gaze_deviation_threshold": ("gaze_deviation_deg", 30),
+    }
+    for old, (new, _fb) in _aliases.items():
+        if old in th and new not in th:
+            th[new] = th[old]
+
+    def _clamp(key: str, lo: float, hi: float, fallback: float) -> None:
+        try:
+            v = float(th.get(key, fallback))
+        except (ValueError, TypeError):
+            v = fallback
+        th[key] = min(hi, max(lo, v))
+
+    _clamp("perclos_threshold", 0.05, 0.9, 0.25)
+    _clamp("blink_rate_max", 1, 60, 25)
+    _clamp("blink_rate_min", 0, 20, 5)
+    _clamp("eye_closed_min_sec", 0.5, 10, 2.0)
+    _clamp("eye_closed_critical_sec", 1.0, 10, 3.0)
+    _clamp("yawn_mar_threshold", 0.2, 1.5, 0.75)
+    _clamp("yawn_peak_mar_min", 0.5, 1.5, 0.9)
+    _clamp("yawn_close_margin", 0.05, 0.4, 0.15)
+    _clamp("yawn_min_duration_sec", 0.5, 5.0, 2.0)
+    _clamp("yawn_cooldown_sec", 5.0, 120.0, 30.0)
+    _clamp("head_tilt_deg_min", 5, 60, 20)
+    _clamp("head_tilt_duration_sec", 1, 15, 3.0)
+    _clamp("ear_closed_threshold", 0.05, 0.4, 0.2)
+    _clamp("detection_confidence_min", 0.1, 0.99, 0.7)
+    _clamp("belt_detection_confidence", 0.1, 0.99, 0.7)
+    _clamp("phone_duration_sec", 0.5, 15, 2.0)
+    _clamp("gaze_duration_sec", 0.5, 15, 3.0)
+    _clamp("gaze_exit_deg", 5, 60, 22)
+    _clamp("gaze_smooth_alpha", 0.05, 1.0, 0.35)
+    _clamp("gaze_yaw_offset", -45, 45, 0.0)
+    _clamp("gaze_pitch_offset", -45, 45, 0.0)
+    _clamp("gaze_calib_samples", 0, 600, 60)
+    _clamp("pose_yaw_limit_deg", 30, 179, 80.0)
+    _clamp("pose_pitch_limit_deg", 30, 179, 65.0)
+    _clamp("prolonged_max_repeats", 1, 50, 5)
+    _clamp("track_grace_sec", 0.0, 2.0, 0.4)
+    _clamp("belt_no_detection_sec", 3, 60, 10.0)
+    _clamp("frame_budget_sec", 0.5, 5.0, 2.0)
     return config
 
 
