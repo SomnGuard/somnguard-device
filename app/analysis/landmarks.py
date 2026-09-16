@@ -26,23 +26,27 @@ class LandmarkDetector:
         min_detection_confidence: float = 0.5,
         min_tracking_confidence: float = 0.5,
         max_num_faces: int = 1,
+        model_path: str = "models/face_landmarker.task",
     ):
-        model_path = "models/face_landmarker.task"
-        self._landmarker = mp.tasks.vision.FaceLandmarker.create_from_options(
-            mp.tasks.vision.FaceLandmarkerOptions(
-                base_options=mp.tasks.BaseOptions(
-                    model_asset_path=model_path,
-                ),
-                running_mode=mp.tasks.vision.RunningMode.LIVE_STREAM,
-                num_faces=max_num_faces,
-                min_face_detection_confidence=min_detection_confidence,
-                min_face_presence_confidence=min_tracking_confidence,
-                min_tracking_confidence=min_tracking_confidence,
-                output_face_blendshapes=False,
-                output_facial_transformation_matrixes=False,
-                result_callback=self._result_callback,
+        self.model_path = model_path
+        try:
+            self._landmarker = mp.tasks.vision.FaceLandmarker.create_from_options(
+                mp.tasks.vision.FaceLandmarkerOptions(
+                    base_options=mp.tasks.BaseOptions(
+                        model_asset_path=model_path,
+                    ),
+                    running_mode=mp.tasks.vision.RunningMode.LIVE_STREAM,
+                    num_faces=max_num_faces,
+                    min_face_detection_confidence=min_detection_confidence,
+                    min_face_presence_confidence=min_tracking_confidence,
+                    min_tracking_confidence=min_tracking_confidence,
+                    output_face_blendshapes=False,
+                    output_facial_transformation_matrixes=False,
+                    result_callback=self._result_callback,
+                )
             )
-        )
+        except Exception as e:
+            raise RuntimeError(f"No se pudo cargar {model_path}: {e}") from e
         self._latest_result: Optional[mp.tasks.vision.FaceLandmarkerResult] = None
         self._initialized = True
         logger.debug("FaceLandmarker inicializado (MediaPipe Tasks API)")
