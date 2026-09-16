@@ -33,6 +33,7 @@ class Detector:
     # thresholds llegaban vacíos).
     def __init__(self, thresholds: dict[str, Any]):
         self.thresholds = thresholds or {}
+        self._landmark_detector: Any = None
         self._fov_min_face_ratio = self.thresholds.get("fov_min_face_ratio", 0.02)
         self._fov_max_face_ratio = self.thresholds.get("fov_max_face_ratio", 0.85)
         self._obstruction_landmark_threshold = self.thresholds.get("obstruction_landmark_threshold", 0.3)
@@ -49,11 +50,12 @@ class Detector:
         
         logger.info(f"Detector umbrales: fov_min={self._fov_min_face_ratio}, fov_max={self._fov_max_face_ratio}")
 
-    async def load_model(self) -> None:
+    async def load_model(self, model_path: str = "models/face_landmarker.task") -> None:
         self._landmark_detector = LandmarkDetector(
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5,
             max_num_faces=1,
+            model_path=model_path,
         )
         logger.info("Detector inicializado con MediaPipe Face Mesh")
 
