@@ -58,7 +58,8 @@
     "fov_max_face_ratio": 0.85,
     "obstruction_landmark_threshold": 0.3,
     "frame_budget_sec": 2.0,
-    "alarm_latency_sec": 1.0
+    "alarm_latency_sec": 1.0,
+    "alert_priority_window_sec": 5.0
   },
   "sound_patterns": {
     "AS-01": {
