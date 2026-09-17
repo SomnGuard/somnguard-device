@@ -50,7 +50,8 @@ class GazeEstimator:
     def __init__(self, deviation_deg: float = 30.0, exit_deg: float | None = None,
                  smooth_alpha: float = 0.35, calib_samples: int = 60,
                  yaw_offset: float = 0.0, pitch_offset: float = 0.0,
-                 yaw_limit: float = 80.0, pitch_limit: float = 65.0):
+                 yaw_limit: float = 80.0, pitch_limit: float = 65.0,
+                 force_off_sec: float = 1.0):
         self.deviation_deg = deviation_deg
         self.exit_deg = exit_deg if exit_deg is not None else deviation_deg - 8.0
         self.smooth_alpha = min(1.0, max(0.05, smooth_alpha))
@@ -59,9 +60,15 @@ class GazeEstimator:
         self.pitch_offset = float(pitch_offset)
         self.yaw_limit = float(yaw_limit)
         self.pitch_limit = float(pitch_limit)
+        # Zona ciega extrema: con rostro tracked pero pose rechazada de forma
+        # sostenida (giro total, solvePnP en flip), se asume desvío y se
+        # fuerza off. Sin esto, mirar muy al costado no latchaba nunca porque
+        # los primeros frames ya eran flips (off nunca se activaba).
+        self.force_off_sec = max(0.5, float(force_off_sec))
         self._syaw: float | None = None
         self._spitch: float | None = None
         self._off = False
+        self._reject_since: float | None = None
         self._calib_yaw: list[float] = []
         self._calib_pitch: list[float] = []
         self._calib_attempts = 0
@@ -73,15 +80,22 @@ class GazeEstimator:
     def calibrated(self) -> bool:
         return self._calibrated
 
-    def update_raw(self, yaw_deg: float, pitch_deg: float = 0.0) -> bool:
-        from app.analysis.ear_mar import is_head_pose_plausible
+    def update_raw(self, yaw_deg: float, pitch_deg: float = 0.0,
+                   now: float | None = None) -> bool:
+        from app.analysis.ear_mar import wrap_deg
+        import math
+        import time as _time
 
-        if not is_head_pose_plausible(pitch_deg, yaw_deg, self.yaw_limit, self.pitch_limit):
-            # Frame degenerado (flip de solvePnP): se ignora sin tocar el
-            # suavizado ni la calibración; se mantiene el estado previo.
-            return self._off
-        yaw = float(yaw_deg) - self.yaw_offset
-        pitch = float(pitch_deg) - self.pitch_offset
+        now = _time.monotonic() if now is None else float(now)
+        try:
+            yaw_raw = float(yaw_deg)
+            pitch_raw = float(pitch_deg)
+            if not (math.isfinite(yaw_raw) and math.isfinite(pitch_raw)):
+                return self._rejected(now)
+        except (TypeError, ValueError):
+            return self._rejected(now)
+        yaw = yaw_raw - self.yaw_offset
+        pitch = pitch_raw - self.pitch_offset
         if not self._calibrated:
             self._calib_attempts += 1
             self._calib_yaw.append(yaw)
@@ -97,13 +111,30 @@ class GazeEstimator:
                 self._calib_yaw.clear()
                 self._calib_pitch.clear()
             # Durante calibración no se alerta (neutro aún desconocido).
-            self._syaw, self._spitch = yaw, pitch
+            # Al completarla se reinicia el suavizado: post-calibración guarda
+            # DELTAS y sembrar la EMA con crudos fabricaría un desvío fantasma
+            # (~110° por el sesgo de pitch) en los primeros frames.
+            if self._calibrated:
+                self._syaw, self._spitch = None, None
+            else:
+                self._syaw, self._spitch = yaw, pitch
             return False
+        # Gate en DELTAS relativos (con wrap), no en valores absolutos: el
+        # solvePnP trae sesgo ~±180° en pitch (frente lee +170°) y flips en
+        # giros; el gate absoluto descartaba el 100% de los frames de campo.
+        dyaw = wrap_deg(yaw - self._base_yaw)
+        dpitch = wrap_deg(pitch - self._base_pitch)
+        if abs(dyaw) > self.yaw_limit or abs(dpitch) > self.pitch_limit:
+            # Frame degenerado (flip): se ignora sin tocar el suavizado;
+            # se mantiene el estado previo (o se fuerza off si la zona
+            # ciega se sostiene: giro extremo real, no glitch).
+            return self._rejected(now)
+        self._reject_since = None
         a = self.smooth_alpha
-        self._syaw = yaw if self._syaw is None else (1 - a) * self._syaw + a * yaw
-        self._spitch = pitch if self._spitch is None else (1 - a) * self._spitch + a * pitch
-        rel_yaw = self._syaw - self._base_yaw
-        rel_pitch = self._spitch - self._base_pitch
+        self._syaw = dyaw if self._syaw is None else (1 - a) * self._syaw + a * dyaw
+        self._spitch = dpitch if self._spitch is None else (1 - a) * self._spitch + a * dpitch
+        rel_yaw = self._syaw
+        rel_pitch = self._spitch
         mag = max(abs(rel_yaw), abs(rel_pitch))
         if not self._off and mag >= self.deviation_deg:
             self._off = True
@@ -111,13 +142,24 @@ class GazeEstimator:
             self._off = False
         return self._off
 
-    def relative(self) -> tuple[float, float]:
-        """Desviación relativa actual (suavizada − neutro). (0,0) si no hay datos."""
-        if self._syaw is None or self._spitch is None:
-            return 0.0, 0.0
-        return self._syaw - self._base_yaw, self._spitch - self._base_pitch
+    def _rejected(self, now: float) -> bool:
+        if self._reject_since is None:
+            self._reject_since = now
+        elif (now - self._reject_since) >= self.force_off_sec:
+            self._off = True
+        return self._off
 
-    def from_landmarks(self, lm: FaceLandmarks | None) -> tuple[bool, float, float]:
+    def relative(self) -> tuple[float, float]:
+        """Desviación relativa actual respecto al neutro. (0,0) si no hay datos."""
+        sy = self._syaw if self._syaw is not None else 0.0
+        sp = self._spitch if self._spitch is not None else 0.0
+        if self._calibrated:
+            # Post-calibración el suavizado ya guarda deltas.
+            return sy, sp
+        return sy - self._base_yaw, sp - self._base_pitch
+
+    def from_landmarks(self, lm: FaceLandmarks | None,
+                       now: float | None = None) -> tuple[bool, float, float]:
         """Retorna (off_axis, yaw, pitch). Sin rostro -> pausa (conserva neutro)."""
         if lm is None:
             # Pausa transitoria: se limpia el suavizado pero se conserva el
@@ -126,10 +168,11 @@ class GazeEstimator:
             self._syaw = None
             self._spitch = None
             self._off = False
+            self._reject_since = None
             return False, 0.0, 0.0
         try:
             pitch, yaw, _ = estimate_head_pose(lm.landmarks, lm.image_shape)
-            return self.update_raw(yaw, pitch), yaw, pitch
+            return self.update_raw(yaw, pitch, now), yaw, pitch
         except Exception:
             return False, 0.0, 0.0
 
@@ -137,12 +180,26 @@ class GazeEstimator:
         self._syaw = None
         self._spitch = None
         self._off = False
+        self._reject_since = None
         self._calib_yaw.clear()
         self._calib_pitch.clear()
         self._calib_attempts = 0
         self._base_yaw = 0.0
         self._base_pitch = 0.0
         self._calibrated = self.calib_samples <= 0
+
+    def reset_transient(self) -> None:
+        """Pausa breve (FOV inválido / rostro perdido un frame).
+
+        Limpia suavizado y estado off, pero CONSERVA neutro calibrado y
+        progreso de calibración. El `reset()` completo solo se usa al
+        cambio de conductor / reset manual; llamarlo en cada FOV malo
+        impedía calibrar jamás (loop infinito sin alertas).
+        """
+        self._syaw = None
+        self._spitch = None
+        self._off = False
+        self._reject_since = None
 
 
 class PhoneDetector:
@@ -234,7 +291,7 @@ class MovementEstimator:
     """Movimiento anómalo por diferencia de frames (brusco/sostenido)."""
 
     def __init__(self, diff_threshold: float = 25.0):
-        self.diff_threshold = diff_threshold
+        self.diff_threshold = float(diff_threshold)
         self._prev: Optional[np.ndarray] = None
 
     def update(self, frame: np.ndarray | None) -> bool:
@@ -291,7 +348,9 @@ class DistractionDetector:
         t = self.thresholds
         self.phone_dur = float(t.get("phone_duration_sec", 2.0))
         self.phone_prolonged = float(t.get("phone_prolonged_sec", 5.0))
-        self.gaze_dur = float(t.get("gaze_duration_sec", 3.0))
+        # NHTSA/Klauer: >2s eyes-off-road ya multiplica el riesgo (x3.8);
+        # >5s lo dispara (x8.9). DIS-03 a 2s, no 3s.
+        self.gaze_dur = float(t.get("gaze_duration_sec", 2.0))
         self.gaze_prolonged = float(t.get("gaze_prolonged_sec", 5.0))
         self.move_dur = float(t.get("movement_duration_sec", 3.0))
         self.repeat_sec = float(t.get("phone_repeat_sec", t.get("gaze_repeat_sec", 3.0)))
@@ -306,6 +365,14 @@ class DistractionDetector:
         self.gaze.pitch_offset = float(t.get("gaze_pitch_offset", 0.0))
         self.gaze.yaw_limit = float(t.get("pose_yaw_limit_deg", 80.0))
         self.gaze.pitch_limit = float(t.get("pose_pitch_limit_deg", 65.0))
+        try:
+            self.gaze.force_off_sec = max(0.5, float(t.get("gaze_force_off_sec", 1.0)))
+        except (TypeError, ValueError):
+            self.gaze.force_off_sec = 1.0
+        try:
+            self.movement_est.diff_threshold = float(t.get("movement_diff_threshold", 25.0))
+        except (TypeError, ValueError):
+            self.movement_est.diff_threshold = 25.0
         # Gracia: un frame suelto en eje no corta un episodio real
         # (parpadeo del estimador); episodios falsos sostenidos siguen
         # requiriendo 3s/5s completos para disparar.
@@ -394,6 +461,34 @@ class DistractionDetector:
                 self._fired.discard(base_ev)
                 self._fired.discard(prol_ev)
         return out
+
+    def debug_state(self, now: float | None = None) -> dict:
+        """Progreso temporizado hacia EV-DIS-01..05 (sin disparar nada)."""
+        now = self._now() if now is None else float(now)
+
+        def _dur(start: float | None) -> float:
+            return round(now - start, 2) if start is not None else 0.0
+
+        try:
+            rel_yaw, rel_pitch = self.gaze.relative()
+        except Exception:
+            rel_yaw, rel_pitch = 0.0, 0.0
+        return {
+            "phone_active": self._phone_start is not None,
+            "phone_dur_sec": _dur(self._phone_start),
+            "phone_need_sec": self.phone_dur,
+            "phone_prolonged_sec": self.phone_prolonged,
+            "gaze_off": bool(getattr(self.gaze, "_off", False)),
+            "gaze_calibrated": bool(getattr(self.gaze, "_calibrated", True)),
+            "gaze_rel_yaw": round(float(rel_yaw), 1),
+            "gaze_rel_pitch": round(float(rel_pitch), 1),
+            "gaze_dur_sec": _dur(self._gaze_start),
+            "gaze_need_sec": self.gaze_dur,
+            "gaze_prolonged_sec": self.gaze_prolonged,
+            "move_active": self._move_start is not None,
+            "move_dur_sec": _dur(self._move_start),
+            "move_need_sec": self.move_dur,
+        }
 
     def reset(self) -> None:
         self._phone_start = self._gaze_start = self._move_start = None

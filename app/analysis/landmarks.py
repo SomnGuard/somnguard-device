@@ -104,10 +104,21 @@ def get_key_points(landmarks: np.ndarray) -> dict[str, np.ndarray]:
     return {
         "left_eye": landmarks[[33, 160, 158, 133, 153, 144]],      # 6 pts
         "right_eye": landmarks[[362, 385, 387, 263, 373, 380]],   # 6 pts
-        "mouth": landmarks[[61, 84, 17, 314, 405, 320]],           # 6 pts
+        # Boca con apertura INTERNA (p1..p6 para la fórmula MAR):
+        # p1=61/p4=291 comisuras externas (ancho estable),
+        # p2=13/p6=14 labio interno centro (alto principal),
+        # p3=82/p5=87 labio interno izq (alto secundario).
+        # El set anterior (84/17/314/405/320, borde externo) saturaba en
+        # ~0.6 con la boca muy abierta de frente y solo subía al girar
+        # (acortamiento del ancho por perspectiva): imposible de umbralizar.
+        "mouth": landmarks[[61, 13, 82, 291, 87, 14]],             # 6 pts
         "nose_tip": landmarks[1:2],                                 # 1 pt
         "chin": landmarks[152:153],                                 # 1 pt
         "left_ear": landmarks[234:235],                             # 1 pt
         "right_ear": landmarks[454:455],                            # 1 pt
         "forehead": landmarks[10:11],                               # 1 pt
     }
+
+
+# Índices de boca en orden p1..p6 (fuente única para overlays/debug).
+MOUTH_IDX = [61, 13, 82, 291, 87, 14]

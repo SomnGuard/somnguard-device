@@ -458,6 +458,22 @@ class DeviceManager:
             return
         logger.info("Cambio de estado: %s -> %s", self.ctx.current_state.value, new_state.value)
         self.ctx.current_state = new_state
+        # Al volver a ACTIVO el timer de obstrucción 5/20/30 quedó congelado
+        # durante ESPERA (ahí no corre detector.process, solo detect_face_only).
+        # Sin reset, el primer frame regular con un parpadeo de FOV re-pausa
+        # instantáneo con un elapsed de 60-90s (flap ESPERA->ACTIVO->ESPERA).
+        # Ventana fresca al re-activar.
+        if new_state == DeviceState.ACTIVO:
+            try:
+                det = getattr(self.ctx, "detector", None)
+                if det is not None and hasattr(det, "reset_obstruction"):
+                    det.reset_obstruction()
+                pipe = getattr(self.ctx, "pipeline", None)
+                obs = getattr(pipe, "obstruction", None) if pipe is not None else None
+                if obs is not None and obs is not det and hasattr(obs, "reset_obstruction"):
+                    obs.reset_obstruction()
+            except Exception as e:
+                logger.debug("No se pudo resetear timer obstrucción: %s", e)
         try:
             self.ctx.identity = update_state(self.ctx.identity, new_state)
         except OSError as e:
@@ -629,6 +645,12 @@ class DeviceManager:
         if not events:
             return
 
+        # Todos los eventos se loguean; pero suena UNO solo por lote: el de
+        # mayor severidad. Un mismo movimiento (p.ej. tilt lateral) dispara
+        # AS-03 + AS-06 a ~100ms y dos pitidos encimados solo agregan ruido;
+        # la detección de ambos queda en log y sync igual.
+        _RANK = {"CRITICA": 4, "SEVERA": 3, "MODERADA": 2, "LEVE": 1, "INFO": 0}
+        best = None  # (rank, alert_code, pattern)
         for event_data in events:
             try:
                 alert_code = AlertCode(event_data.get("alert_code", "AS-01"))
@@ -638,10 +660,17 @@ class DeviceManager:
             # background para no bloquear el loop de captura.
             logger.info("Evento detectado: %s (%s)",
                         alert_code.value, event_data.get("message", ""))
+            rank = _RANK.get(str(event_data.get("severity", "INFO")).upper(), 0)
+            if best is None or rank > best[0]:
+                try:
+                    pattern = get_sound_pattern(self.ctx.config, alert_code)
+                except Exception:
+                    continue
+                best = (rank, alert_code, pattern)
+        if best is not None:
             try:
                 loop = asyncio.get_running_loop()
-                pattern = get_sound_pattern(self.ctx.config, alert_code)
-                loop.create_task(self._play_alert_background(pattern, alert_code))
+                loop.create_task(self._play_alert_background(best[2], best[1]))
             except RuntimeError:
                 pass
 
