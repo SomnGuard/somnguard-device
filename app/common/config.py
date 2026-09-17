@@ -293,6 +293,7 @@ def _sanitize_config(config: DeviceConfig) -> DeviceConfig:
     _clamp("movement_diff_threshold", 1.0, 100.0, 25.0)
     _clamp("belt_no_detection_sec", 3, 60, 10.0)
     _clamp("frame_budget_sec", 0.5, 5.0, 2.0)
+    _clamp("alert_priority_window_sec", 0.0, 30.0, 5.0)
     return config
 
 
