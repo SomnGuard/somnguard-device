@@ -668,6 +668,22 @@ class DeviceManager:
                     continue
                 best = (rank, alert_code, pattern)
         if best is not None:
+            # Árbitro temporal: SoundPlayer.play() corta al anterior, así que
+            # un evento menor que llega junto a uno mayor lo "cancela".
+            # Dentro de la ventana solo suena un rango igual o mayor; el menor
+            # se loguea pero no suena (la detección queda intacta).
+            try:
+                window = float((self.ctx.config.detection_thresholds or {}).get(
+                    "alert_priority_window_sec", 5.0))
+            except (TypeError, ValueError):
+                window = 5.0
+            now_m = time.monotonic()
+            last = getattr(self, "_last_priority_alert", None)
+            if last is not None and (now_m - last[0]) < window and best[0] < last[1]:
+                logger.debug("Sonido %s suprimido por prioridad (hay rango %d hace %.1fs)",
+                             best[1].value, last[1], now_m - last[0])
+                return
+            self._last_priority_alert = (now_m, best[0])
             try:
                 loop = asyncio.get_running_loop()
                 loop.create_task(self._play_alert_background(best[2], best[1]))

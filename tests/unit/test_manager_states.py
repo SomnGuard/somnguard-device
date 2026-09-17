@@ -306,3 +306,51 @@ def test_batch_plays_only_highest_severity_sound(monkeypatch, tmp_path):
         assert mgr.ctx.sound_player.played[0].alert_code == AlertCode.AS_03
 
     run(scenario())
+
+
+def _ev(code, alert, sev, msg="x"):
+    from types import SimpleNamespace
+    return SimpleNamespace(events=[{"event_type_id": code, "alert_code": alert,
+                                    "severity": sev, "message": msg}],
+                           face_present=True, fov_ok=True, metrics={})
+
+
+def test_priority_minor_suppressed_after_major(monkeypatch, tmp_path):
+    async def scenario():
+        mgr = make_manager(monkeypatch, tmp_path, state=DeviceState.ACTIVO)
+        mgr.ctx.current_state = DeviceState.ACTIVO
+        await mgr._handle_detection_result(_ev("EV-SOM-05", "AS-04", "CRITICA"))
+        await asyncio.sleep(0.05)
+        await mgr._handle_detection_result(_ev("EV-SOM-02", "AS-02", "MODERADA"))
+        await asyncio.sleep(0.05)
+        assert len(mgr.ctx.sound_player.played) == 1  # solo la CRITICA sonó
+        assert mgr.ctx.sound_player.played[0].alert_code == AlertCode.AS_04
+
+    run(scenario())
+
+
+def test_priority_major_after_minor_sounds(monkeypatch, tmp_path):
+    async def scenario():
+        mgr = make_manager(monkeypatch, tmp_path, state=DeviceState.ACTIVO)
+        mgr.ctx.current_state = DeviceState.ACTIVO
+        await mgr._handle_detection_result(_ev("EV-DIS-03", "AS-06", "INFO"))
+        await asyncio.sleep(0.05)
+        await mgr._handle_detection_result(_ev("EV-SOM-05", "AS-04", "CRITICA"))
+        await asyncio.sleep(0.05)
+        assert len(mgr.ctx.sound_player.played) == 2
+
+    run(scenario())
+
+
+def test_priority_window_expiry_sounds_again(monkeypatch, tmp_path):
+    async def scenario():
+        mgr = make_manager(monkeypatch, tmp_path, state=DeviceState.ACTIVO)
+        mgr.ctx.current_state = DeviceState.ACTIVO
+        mgr.ctx.config.detection_thresholds["alert_priority_window_sec"] = 0.05
+        await mgr._handle_detection_result(_ev("EV-SOM-05", "AS-04", "CRITICA"))
+        await asyncio.sleep(0.1)  # expira la ventana
+        await mgr._handle_detection_result(_ev("EV-SOM-02", "AS-02", "MODERADA"))
+        await asyncio.sleep(0.05)
+        assert len(mgr.ctx.sound_player.played) == 2
+
+    run(scenario())
