@@ -160,6 +160,27 @@ def test_obstruction_pause_transitions_to_espera(monkeypatch, tmp_path):
     run(scenario())
 
 
+def test_reactivation_resets_stale_obstruction_timer(monkeypatch, tmp_path):
+    """Regresión flap ESPERA->ACTIVO->ESPERA: el timer 5/20/30 se congela en
+    ESPERA (solo detect_face_only); al volver a ACTIVO debe resetearse para
+    no re-pausar instantáneo con un elapsed de 60-90s."""
+    from app.analysis.detector import Detector
+
+    async def scenario():
+        mgr = make_manager(monkeypatch, tmp_path, state=DeviceState.ESPERA)
+        mgr.ctx.current_state = DeviceState.ESPERA
+        mgr.ctx.detector = Detector({})
+        # Simula timer rancio de antes de ESPERA (obstruido desde hace 90s).
+        mgr.ctx.detector._obstruction_start_time = time.monotonic() - 90.0
+        mgr.ctx.detector._alert_stage = 2
+        await mgr._transition_to(DeviceState.ACTIVO)
+        assert mgr.ctx.detector._obstruction_start_time is None
+        assert mgr.ctx.detector._alert_stage == 0
+        assert mgr.ctx.detector.needs_detection_pause is False
+
+    run(scenario())
+
+
 # -- AC-007 ---------------------------------------------------------------
 def test_self_register_201_persists_and_assigns(monkeypatch, tmp_path):
     async def scenario():
@@ -259,5 +280,29 @@ def test_backend_suspended_pauses_detection(monkeypatch, tmp_path):
         mgr.ctx.current_state = DeviceState.ACTIVO
         await mgr._heartbeat_once()
         assert mgr.ctx.current_state == DeviceState.SUSPENDIDO
+
+    run(scenario())
+
+
+def test_batch_plays_only_highest_severity_sound(monkeypatch, tmp_path):
+    """Un lote AS-03 (SEVERA) + AS-06 (INFO) loguea ambos pero suena uno."""
+    from types import SimpleNamespace
+
+    async def scenario():
+        mgr = make_manager(monkeypatch, tmp_path, state=DeviceState.ACTIVO)
+        mgr.ctx.current_state = DeviceState.ACTIVO
+        res = SimpleNamespace(
+            events=[
+                {"event_type_id": "EV-SOM-04", "alert_code": "AS-03",
+                 "severity": "SEVERA", "message": "Cabeceo"},
+                {"event_type_id": "EV-DIS-03", "alert_code": "AS-06",
+                 "severity": "INFO", "message": "Mirada"},
+            ],
+            face_present=True, fov_ok=True, metrics={},
+        )
+        await mgr._handle_detection_result(res)
+        await asyncio.sleep(0.05)
+        assert len(mgr.ctx.sound_player.played) == 1
+        assert mgr.ctx.sound_player.played[0].alert_code == AlertCode.AS_03
 
     run(scenario())

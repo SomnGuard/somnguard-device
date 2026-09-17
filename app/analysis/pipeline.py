@@ -126,12 +126,18 @@ class VisionPipeline:
             events += self.somnolence.process_landmarks(lm, t_start)
         except Exception as e:
             logger.debug("Somnolencia falló: %s", e)
-        # 3) distracción: solo con FOV válido. Con cara parcial el pose es
-        # ruidoso y el gaze/phone generan falsos positivos; en ese caso ya
-        # hay eventos de obstrucción/FOV del paso 1.
+        # 3) distracción: el gaze se evalúa siempre que haya landmarks
+        # (mirar al costado suele degradar el FOV y antes se saltaba justo el
+        # caso que debe detectar EV-DIS-03/04). Teléfono/movimiento sí exigen
+        # FOV válido (pose ruidosa con cara parcial). Sin FOV se reportan
+        # como sin evidencia pero el timer de gaze sigue corriendo.
+        try:
+            gaze_off, _yaw, _pitch = self.distraction.gaze.from_landmarks(lm)
+        except Exception as e:
+            logger.debug("Gaze falló: %s", e)
+            gaze_off, _yaw, _pitch = False, 0.0, 0.0
         if fov_ok:
             try:
-                gaze_off, _yaw, _pitch = self.distraction.gaze.from_landmarks(lm)
                 phone_present, _conf = self.distraction.phone.detect(small)
                 moving = self.distraction.movement_est.update(small)
                 events += self.distraction.update(phone_present, gaze_off, moving, t_start,
@@ -140,9 +146,10 @@ class VisionPipeline:
                 logger.debug("Distracción falló: %s", e)
         else:
             try:
-                self.distraction.gaze.reset()
-            except Exception:
-                pass
+                events += self.distraction.update(False, gaze_off, False, t_start,
+                                                  gaze_yaw=_yaw, gaze_pitch=_pitch)
+            except Exception as e:
+                logger.debug("Distracción (sin FOV) falló: %s", e)
         # 4) cinturón: solo si evaluable (modelo inyectado o FOV amplio).
         try:
             vis, corr, _c = self.seatbelt.vision.detect(small)
