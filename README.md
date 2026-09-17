@@ -175,9 +175,9 @@ Sin cámara ni red: dependencias pesadas (`cv2`/`mediapipe`) con stubs en
 
 | AC | Comportamiento |
 |----|----------------|
-| **AC-001** | `SomnolenceDetector`: blink anómalo 15s → `EV-SOM-01`, ojos>2s → `EV-SOM-02`, ≥2 bostezos/5min → `EV-SOM-03` (MAR≥0.75 sostenido ≥2.0s con pico ≥0.9, histéresis 0.15, cooldown 30s, emite solo al contar bostezo nuevo: hablar ya no cuenta ni re-dispara), tilt>20°/3s → `EV-SOM-04`, ojos>3s+tilt → `EV-SOM-05` |
+| **AC-001** | `SomnolenceDetector`: blink anómalo 15s o cierre lento 0.5-2s → `EV-SOM-01`, ojos>2s → `EV-SOM-02`, bostezo prolongado ≥3s → `EV-SOM-03` (cada uno alerta; conteo en ventana como evidencia), tilt relativo ≥15°/3s (neutro auto-cero) → `EV-SOM-04`, ojos>3s+tilt → `EV-SOM-05` |
 | **AC-002** | `severity.py` canónico: `AS-01 LEVE / AS-02 MODERADA / AS-03 SEVERA / AS-04 CRITICA` |
-| **AC-003** | `DistractionDetector`: teléfono v1 por ObjectDetector (`cell phone`>2s `EV-DIS-01`, >5s `EV-DIS-02` c/3s; sin `.tflite` degradado seguro), mirada con `GazeEstimator` suavizado EMA + histéresis (entra 30°/sale 22°, spike aislado no latcha) + auto-cero (mediana inicial absorbe sesgo de montaje) + rechazo de poses imposibles (flip solvePnP: yaw>80°/pitch>65° se ignoran) >3s `EV-DIS-03` (>5s `EV-DIS-04`, máx 5 repeticiones por episodio, gracia 0.4s), movimiento>3s `EV-DIS-05`. Mensaje incluye yaw/pitch para diagnóstico. Distracción solo con FOV válido |
+| **AC-003** | `DistractionDetector`: teléfono v1 por ObjectDetector (`cell phone`>2s `EV-DIS-01`, >5s `EV-DIS-02` c/3s; sin `.tflite` degradado seguro), mirada con `GazeEstimator` suavizado EMA + histéresis (entra 30°/sale 22°, spike aislado no latcha) + auto-cero + deltas con wrap (sesgo pitch +170° absorbido) + force-off tras 1s en zona ciega >2s `EV-DIS-03` (>5s `EV-DIS-04`, máx 5 repeticiones por episodio, gracia 0.4s), movimiento>3s `EV-DIS-05`. Gaze se evalúa con landmarks aunque el FOV falle |
 | **AC-004** | ⛔ DESACTIVADO (`belt_enabled=false`): `SeatbeltDetector` retorna siempre [] hasta validación HW. Lógica 10s + intermitente c/5s lista y testeada con `belt_enabled=true`. Requiere FOV amplio o 2ª cámara para producción |
 | **AC-005** | `VisionPipeline`: downscale 640px, métricas `capture_to_validated/process_sec`, skip-frame adaptativo, presupuesto `frame_budget_sec: 2.0`. Manager: log inmediato + sonido en background (<1s), fix doble `read_frame` en ESPERA |
 | **AC-006** | `load_models()` por modelo con `models_status`; fallo → `EV-SYS-02/AS-09` cooldown 30s + reintento 30s (patrón HU-DEVICE-002). `LandmarkDetector(model_path=...)` inyectable |
@@ -196,20 +196,23 @@ el default) con solo lo que quieras cambiar:
   "detection_thresholds": {
     "yawn_mar_threshold": 0.8,
     "yawn_peak_mar_min": 1.0,
-    "yawn_min_duration_sec": 2.0,
+    "yawn_min_duration_sec": 3.0,
     "yawn_cooldown_sec": 60.0,
-    "yawn_count_min": 3
+    "yawn_count_min": 2
   }
 }
 ```
 
 | Mando | Default | Subir ⇧ | Bajar ⇩ |
 |-------|---------|---------|---------|
-| `yawn_mar_threshold` (boca abierta) | 0.75 | menos alertas, solo bocas grandes (0.8) | más sensible (0.7) |
-| `yawn_peak_mar_min` (pico del episodio) | 0.9 | mata FP de habla fuerte: solo estirón máximo (1.0) | bostezos chicos (0.8) |
-| `yawn_min_duration_sec` | 2.0 | ignora exclamaciones (2.5) | más sensible (1.5) |
+| `yawn_mar_threshold` (boca abierta) | 0.85 | menos alertas, solo bocas grandes (0.9) | más sensible (0.7) |
+| `yawn_peak_mar_min` (pico del episodio) | 1.0 | mata FP de habla fuerte: solo estirón máximo (1.1) | bostezos chicos (0.85) |
+| `yawn_min_duration_sec` (PLOS: fatiga ≥3s) | 3.0 | más estricto (3.5) | más sensible (2.5) |
 | `yawn_cooldown_sec` (separación mínima) | 30 | menos conteos seguidos (60) | cuenta bostezos encadenados (15) |
-| `yawn_count_min` (disparo norma 2/5min) | 2 | exige 3 en 5 min | 1 = alerta al primer bostezo |
+| `yawn_count_min` (alertas por ventana) | 1 | 2 = estilo norma 2/5min | 1 = cada bostezo alerta |
+| `head_tilt_deg_min` (MDPI: fatiga 12-20°) | 15 | menos sensible (20) | más sensible (12) |
+| `gaze_duration_sec` (NHTSA: riesgo >2s) | 2.0 | menos sensible (3) | 1.5 = muy sensible |
+| `blink_slow_sec` (cierre lento aislado) | 0.5 | solo muy lentos (0.8) | más sensible (0.4) |
 | `prolonged_max_repeats` (mirada/teléfono) | 5 | más insistencia | 2–3 = se calla antes |
 
 Regla práctica: habla normal pica MAR ~0.5–0.65, habla fuerte sostiene

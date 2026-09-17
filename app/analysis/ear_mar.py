@@ -6,6 +6,8 @@ Todo testeable sin hardware: las funciones reciben arrays (N,2|3).
 from __future__ import annotations
 
 import math
+import statistics
+import time
 from collections import deque
 
 import numpy as np
@@ -47,7 +49,7 @@ def is_eye_closed(ear: float, threshold: float = 0.2) -> bool:
     return ear < threshold
 
 
-def is_yawning(mar: float, threshold: float = 0.75) -> bool:
+def is_yawning(mar: float, threshold: float = 0.85) -> bool:
     return mar > threshold
 
 
@@ -173,3 +175,115 @@ def is_head_pose_plausible(pitch: float, yaw: float,
         return abs(float(yaw)) <= yaw_limit and abs(float(pitch)) <= pitch_limit
     except (TypeError, ValueError):
         return False
+
+
+def wrap_deg(angle: float) -> float:
+    """Diferencia angular a [-180, 180): absorbe el wrap ±180° del solvePnP."""
+    try:
+        return ((float(angle) + 180.0) % 360.0) - 180.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+class TiltEstimator:
+    """Inclinación de cabeza relativa al neutro frontal (auto-zero).
+
+    Hallazgo de campo (logs 2026-09-16): el solvePnP de 6 puntos devuelve el
+    pitch con un sesgo de ~±180° (cara de frente lee pitch≈+170° estable) y
+    flips discretos en giros fuertes. Con umbral absoluto (>20°) y gate de
+    plausibilidad absoluto, el tilt daba siempre 0: EV-SOM-04/05 y la mirada
+    (mismo gate) quedaban muertos.
+
+    Se mide desviación respecto al neutro calibrado (mediana de las primeras
+    `calib_samples` muestras mirando al frente; misma filosofía que
+    GazeEstimator). Deltas con wrap (170°→-170° = 0, no 340). Saltos mayores
+    que los límites = flip de solvePnP: se conserva el último tilt y si el
+    rechazo supera `hold_sec` se vuelve a 0 (tracker perdido).
+    """
+
+    def __init__(self, calib_samples: int = 60, smooth_alpha: float = 0.35,
+                 yaw_limit: float = POSE_PLAUSIBLE_YAW_DEG,
+                 pitch_limit: float = POSE_PLAUSIBLE_PITCH_DEG,
+                 hold_sec: float = 3.0):
+        self.calib_samples = max(0, int(calib_samples))
+        self.smooth_alpha = min(1.0, max(0.05, float(smooth_alpha)))
+        self.yaw_limit = float(yaw_limit)
+        self.pitch_limit = float(pitch_limit)
+        # Huecos de pose inválida menores que un episodio no lo cortan
+        # (giro rápido que cruza la zona ciega del solvePnP).
+        self.hold_sec = max(0.5, float(hold_sec))
+        self._tilt = 0.0
+        self._syaw: float | None = None
+        self._spitch: float | None = None
+        self._last_ok = 0.0
+        self.reset()
+
+    def reset(self) -> None:
+        self._cal_yaw: list[float] = []
+        self._cal_pitch: list[float] = []
+        self._cal_attempts = 0
+        self._base_yaw = 0.0
+        self._base_pitch = 0.0
+        self._calibrated = self.calib_samples <= 0
+        self._tilt = 0.0
+        self._syaw = None
+        self._spitch = None
+        self._last_ok = 0.0
+
+    @property
+    def calibrated(self) -> bool:
+        return self._calibrated
+
+    def relative(self) -> tuple[float, float]:
+        """Desviación suavizada actual (yaw, pitch) respecto al neutro."""
+        return (self._syaw if self._syaw is not None else 0.0,
+                self._spitch if self._spitch is not None else 0.0)
+
+    def neutral(self) -> tuple[float, float]:
+        return self._base_yaw, self._base_pitch
+
+    def update(self, yaw_deg: float, pitch_deg: float, now: float | None = None) -> float:
+        now = time.monotonic() if now is None else float(now)
+        try:
+            yaw = float(yaw_deg)
+            pitch = float(pitch_deg)
+            finite = math.isfinite(yaw) and math.isfinite(pitch)
+        except (TypeError, ValueError):
+            finite = False
+            yaw = pitch = 0.0
+        if not finite:
+            return self._hold(now)
+        if not self._calibrated:
+            self._cal_attempts += 1
+            self._cal_yaw.append(yaw)
+            self._cal_pitch.append(pitch)
+            if (len(self._cal_yaw) >= self.calib_samples
+                    or self._cal_attempts >= max(1, self.calib_samples * 3)):
+                if self._cal_yaw:
+                    self._base_yaw = float(statistics.median(self._cal_yaw))
+                    self._base_pitch = float(statistics.median(self._cal_pitch))
+                self._calibrated = True
+                self._cal_yaw.clear()
+                self._cal_pitch.clear()
+            self._last_ok = now
+            return 0.0
+        dyaw = wrap_deg(yaw - self._base_yaw)
+        dpitch = wrap_deg(pitch - self._base_pitch)
+        if abs(dyaw) > self.yaw_limit or abs(dpitch) > self.pitch_limit:
+            return self._hold(now)
+        a = self.smooth_alpha
+        self._syaw = dyaw if self._syaw is None else (1 - a) * self._syaw + a * dyaw
+        self._spitch = dpitch if self._spitch is None else (1 - a) * self._spitch + a * dpitch
+        self._tilt = math.hypot(self._syaw, self._spitch)
+        self._last_ok = now
+        return self._tilt
+
+    def _hold(self, now: float) -> float:
+        # Rechazo seguido largo = tracker perdido: decaer a 0 para no latchar
+        # un tilt viejo eternamente (misma idea que la gracia de distracción).
+        if self._last_ok and (now - self._last_ok) > self.hold_sec:
+            self._tilt = 0.0
+            self._syaw = None
+            self._spitch = None
+            return 0.0
+        return self._tilt

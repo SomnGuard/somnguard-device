@@ -56,10 +56,11 @@ def test_phone_2s_emits_dis01_then_5s_dis02_repeat():
     assert d.update(True, False, False, 1009.5) == []
 
 
-def test_gaze_3s_dis03_5s_dis04():
+def test_gaze_2s_dis03_5s_dis04():
+    """NHTSA/Klauer: >2s eyes-off-road ya es riesgo (DIS-03 a 2s, no 3s)."""
     d = DistractionDetector({})
     d.update(False, True, False, 2000.0)
-    evs = d.update(False, True, False, 2003.5)
+    evs = d.update(False, True, False, 2002.5)
     assert any(e["event_type_id"] == "EV-DIS-03" for e in evs)
     assert any(e["alert_code"] == "AS-06" for e in evs)
     evs = d.update(False, True, False, 2005.5)
@@ -125,10 +126,11 @@ def test_gaze_brief_gap_does_not_split_episode():
     """Un frame suelto en eje no reinicia el temporizador (gracia 0.4s)."""
     d = DistractionDetector({})
     d.update(False, True, False, 4000.0)
-    d.update(False, True, False, 4002.0)
+    evs = d.update(False, True, False, 4002.0)
+    assert any(e["event_type_id"] == "EV-DIS-03" for e in evs)  # a 2s ya dispara
     d.update(False, False, False, 4002.2)  # hueco 0.2s < gracia
-    evs = d.update(False, True, False, 4003.5)
-    assert any(e["event_type_id"] == "EV-DIS-03" for e in evs)
+    d.update(False, True, False, 4003.5)
+    assert d._gaze_start == 4000.0  # episodio continuo, sin reseteo
 
 
 def test_gaze_long_gap_resets():
@@ -148,13 +150,49 @@ def test_degenerate_pose_ignored_by_gaze():
 
 
 def test_degenerate_pose_skipped_in_calibration():
-    """La basura no contamina la mediana del neutro."""
+    """La basura no contamina la mediana del neutro (mediana robusta: los
+    flips se absorben aunque entren en las muestras de calibración)."""
     g = GazeEstimator(deviation_deg=30.0, smooth_alpha=1.0, calib_samples=4)
     g.update_raw(35.0, 0.0)
-    g.update_raw(2.0, -179.0)  # flip: se ignora, no consume muestra
+    g.update_raw(2.0, -179.0)  # flip: entra pero la mediana lo absorbe
     g.update_raw(35.0, 0.0)
     g.update_raw(36.0, 0.0)
-    g.update_raw(34.0, 0.0)
     assert g.calibrated is True
-    assert g._base_yaw == 35.0  # mediana de [35,35,36,34]
+    assert g._base_yaw == 35.0  # mediana de [35,2,35,36]
     assert g.update_raw(35.0, 0.0) is False
+
+
+def test_biased_pitch_field_case():
+    """Caso de campo 2026-09-16: pitch frontal +170° (sesgo solvePnP).
+    Tras calibrar el neutro (6,170), un giro a yaw 45° latcha off y el
+    flip extremo (124,-57) lo conserva sin romper."""
+    g = GazeEstimator(deviation_deg=30.0, calib_samples=4)
+    for _ in range(4):
+        assert g.update_raw(6.0, 170.0) is False  # calibrando
+    assert g.calibrated is True
+    assert g._base_pitch == 170.0
+    # Primer frame post-calib: sin fantasma (EMA resembrada en deltas).
+    assert g.update_raw(6.0, 170.0) is False
+    for _ in range(6):
+        g.update_raw(45.0, 165.0)  # delta yaw +39 sostenido
+    assert g._off is True
+    assert g.update_raw(124.0, -57.0) is True  # flip: conserva
+    for _ in range(10):
+        g.update_raw(6.0, 170.0)
+    assert g._off is False  # de vuelta al frente
+
+
+def test_sustained_blind_zone_forces_off():
+    """Mirada extrema (flips sostenidos con rostro) latcha off tras
+    force_off_sec en vez de quedarse ciega para siempre."""
+    g = GazeEstimator(deviation_deg=30.0, calib_samples=4, force_off_sec=1.0)
+    for _ in range(4):
+        g.update_raw(6.0, 170.0, now=100.0)
+    assert g._off is False
+    assert g.update_raw(124.0, -57.0, now=100.5) is False  # aún no
+    assert g.update_raw(124.0, -57.0, now=101.6) is True  # 1.1s ciego -> off
+    # Al volver al frente re-evalúa y limpia en el primer frame válido.
+    assert g.update_raw(6.0, 170.0, now=102.0) is False
+    for i in range(10):
+        g.update_raw(6.0, 170.0, now=103.0 + i * 0.1)
+    assert g._off is False
