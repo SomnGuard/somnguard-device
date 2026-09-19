@@ -93,7 +93,7 @@ class DeviceIdentity:
 
 @dataclass
 class Event:
-    event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    event_id: str = field(default_factory=lambda: new_event_id())
     device_id: str = ""
     event_type_id: str = ""
     category: EventCategory = EventCategory.SISTEMA
@@ -103,6 +103,76 @@ class Event:
     payload: dict = field(default_factory=dict)
     is_offline_sync: bool = True
     synced_at: Optional[datetime] = None
+
+    def to_telemetry_dict(self) -> dict:
+        """Payload HU-API-007: solo metadata JSON (sin archivos inline)."""
+        occurred = self.occurred_at
+        if isinstance(occurred, datetime):
+            occurred_iso = occurred.isoformat() + ("Z" if occurred.tzinfo is None else "")
+        else:
+            occurred_iso = str(occurred)
+        sev = self.severity.value if isinstance(self.severity, Severity) else str(self.severity)
+        alert = None
+        if isinstance(self.alert_code, AlertCode):
+            alert = self.alert_code.value
+        elif self.alert_code:
+            alert = str(self.alert_code)
+        data: dict = {
+            "event_id": self.event_id,
+            "device_id": self.device_id,
+            "occurred_at": occurred_iso,
+            "event_type": self.event_type_id,
+            "severity": sev,
+            "metadata": dict(self.payload or {}),
+            "is_offline_sync": bool(self.is_offline_sync),
+            "has_evidence": bool((self.payload or {}).get("has_evidence", False)),
+        }
+        if alert:
+            data["sound_pattern"] = alert
+        return data
+
+
+def new_event_id() -> str:
+    """UUID v7 time-ordered (idempotencia + orden natural, ADR-005 §6)."""
+    try:
+        return str(uuid.uuid7())  # Python 3.14+
+    except AttributeError:
+        return str(uuid.uuid4())
+
+
+def build_telemetry_event(event_data: dict, device_id: str = "",
+                          event_id: str | None = None,
+                          occurred_at_iso: str | None = None,
+                          has_evidence: bool = False) -> dict:
+    """Normaliza un dict de detector/pipeline al contrato POST /telemetry/events."""
+    from datetime import timezone as _tz
+    eid = event_data.get("event_id") or event_id or new_event_id()
+    occurred = (event_data.get("occurred_at") or occurred_at_iso
+                or datetime.now(_tz.utc).isoformat())
+    if isinstance(occurred, datetime):
+        occurred = occurred.isoformat()
+    metadata = dict(event_data.get("metadata") if isinstance(
+        event_data.get("metadata"), dict) else {})
+    # Preserva métricas útiles (EAR/MAR/PERCLOS/gaze) sin archivos inline.
+    for k, v in event_data.items():
+        if k in ("event_id", "device_id", "occurred_at", "event_type",
+                 "event_type_id", "severity", "sound_pattern", "alert_code",
+                 "metadata", "has_evidence", "is_offline_sync"):
+            continue
+        if k in ("message", "category", "metrics"):
+            metadata.setdefault(k, v)
+    return {
+        "event_id": str(eid),
+        "device_id": device_id or str(event_data.get("device_id", "")),
+        "occurred_at": str(occurred),
+        "event_type": str(event_data.get("event_type_id")
+                          or event_data.get("event_type", "")),
+        "severity": str(event_data.get("severity", "INFO")),
+        "sound_pattern": str(event_data.get("alert_code", "")) or None,
+        "metadata": metadata,
+        "is_offline_sync": True,
+        "has_evidence": bool(has_evidence),
+    }
 
 
 @dataclass
@@ -188,6 +258,7 @@ class SyncResult:
     success: bool
     events_synced: int = 0
     events_failed: int = 0
+    duplicate_ids: list = field(default_factory=list)
     config_updated: bool = False
     new_config: Optional[DeviceConfig] = None
     error: Optional[str] = None
