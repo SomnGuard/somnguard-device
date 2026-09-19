@@ -160,6 +160,7 @@ class DeviceManager:
             self.ctx.sync_engine = SyncEngine(
                 self.ctx.buffer, self.ctx.backend,
                 batch_limit=100,
+                data_dir=data_dir(),
             )
             self.ctx.connectivity = ConnectivityMonitor(
                 self.ctx.backend,
@@ -759,6 +760,8 @@ class DeviceManager:
 
         - Genera ``event_id`` UUID v7 si falta (idempotencia global).
         - Guarda 1 frame JPEG si severidad >= MODERADA (no bloquea).
+        - ``evidence_path`` en DB es RELATIVO ``media/<id>.jpg`` (portable;
+          se resuelve a <data_dir>/... solo al subir/borrar).
         - INSERT en ``pending_events`` (WAL, sobrevive reinicio).
         Retorna nº encolados. Sin buffer (tests legacy) = 0 sin error.
         """

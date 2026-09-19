@@ -4,7 +4,8 @@ Tabla ``pending_events`` (ADR-005 + ADR-004):
 
 - ``id`` TEXT PK = ``event_id`` UUID v7 (clave idempotencia global)
 - ``event_json`` TEXT NOT NULL (evento serializado)
-- ``evidence_path`` TEXT NULL (ruta relativa/absoluta a ``data/media/<id>.jpg``)
+- ``evidence_path`` TEXT NULL (RELATIVO portable ``media/<id>.jpg``; los
+  absolutos legacy ``C:/.../data/media/<id>.jpg`` se migran al leer/escribir)
 - ``status`` TEXT PENDING/SENDING/ACKED/FAILED
 - ``retries`` INTEGER DEFAULT 0
 - ``created_at`` / ``updated_at`` ISO UTC
@@ -54,6 +55,11 @@ class EventBuffer:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
+        # Migra filas legacy con path absoluto → relativo (portable).
+        try:
+            self.migrate_absolute_evidence_paths()
+        except Exception:
+            pass
 
     # -- schema ------------------------------------------------------
     def _connect(self) -> sqlite3.Connection:
@@ -73,9 +79,14 @@ class EventBuffer:
     # -- writes (sync, testeables) -----------------------------------
     def enqueue(self, event_id: str, event_json: dict | str,
                 evidence_path: Optional[str] = None) -> bool:
-        """INSERT OR IGNORE por idempotencia local. Retorna True si insertó."""
+        """INSERT OR IGNORE por idempotencia local. Retorna True si insertó.
+
+        ``evidence_path`` siempre se normaliza a relativo ``media/<id>.jpg``
+        antes de persistir (portable entre máquinas/usuarios).
+        """
         payload = event_json if isinstance(event_json, str) else json.dumps(event_json, ensure_ascii=False)
         now = _utcnow_iso()
+        evidence_path = self.normalize_evidence_path(evidence_path)
         try:
             with self._connect() as conn:
                 cur = conn.execute(
@@ -88,6 +99,51 @@ class EventBuffer:
         except OSError as e:
             logger.error("Buffer enqueue fallido (%s): %s", event_id, e)
             return False
+
+    @staticmethod
+    def normalize_evidence_path(stored: Optional[str]) -> Optional[str]:
+        """Convierte absoluto legacy o variantes a ``media/<file>.jpg``."""
+        try:
+            from app.capture.evidence import to_relative_evidence_path
+            return to_relative_evidence_path(None, stored)
+        except Exception:
+            pass
+        if not stored:
+            return None
+        s = str(stored).strip().replace("\\", "/")
+        if not s:
+            return None
+        name = s.rsplit("/", 1)[-1]
+        return f"media/{name}" if name else None
+
+    def migrate_absolute_evidence_paths(self) -> int:
+        """Reescribe filas con path absoluto → relativo. Retorna nº migradas."""
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT id, evidence_path FROM pending_events"
+                    " WHERE evidence_path IS NOT NULL").fetchall()
+                migrated = 0
+                for r in rows:
+                    raw = r["evidence_path"]
+                    if not raw:
+                        continue
+                    s = str(raw)
+                    # Absoluto Windows/POSIX o con separador de dirs → migrar.
+                    is_abs = ("/" in s or "\\" in s) and s != self.normalize_evidence_path(s)
+                    # Casos: C:\..., C:/..., /var/..., data\media\...
+                    if is_abs or Path(s).is_absolute():
+                        rel = self.normalize_evidence_path(s)
+                        if rel and rel != s:
+                            conn.execute(
+                                "UPDATE pending_events SET evidence_path=?, updated_at=? WHERE id=?",
+                                (rel, _utcnow_iso(), r["id"]),
+                            )
+                            migrated += 1
+                return migrated
+        except OSError as e:
+            logger.debug("migrate_absolute_evidence_paths fallido: %s", e)
+            return 0
 
     def mark_sending(self, ids: list[str]) -> None:
         if not ids:
@@ -163,21 +219,28 @@ class EventBuffer:
             return 0
 
     def purge_old_evidence_files(self, media_dir: Path, retention_days: int = 7) -> int:
-        """Borra JPGs huérfanos/antiguos en data/media (retención evidencia 7d)."""
+        """Borra JPGs huérfanos/antiguos en data/media (retención evidencia 7d).
+
+        Compara por NOMBRE de archivo (robusto a paths relativos nuevos y
+        absolutos legacy): ``media/ev.jpg`` y ``C:/.../media/ev.jpg`` cuentan
+        como el mismo.
+        """
         removed = 0
         try:
             if not media_dir.exists():
                 return 0
             cutoff = datetime.now(timezone.utc).timestamp() - retention_days * 86400
-            # 1) huérfanos: archivo sin fila en buffer
+            # 1) huérfanos: archivo sin fila en buffer (match por nombre,
+            # válido para relativos nuevos y absolutos legacy).
             with self._connect() as conn:
                 rows = conn.execute("SELECT evidence_path FROM pending_events"
                                     " WHERE evidence_path IS NOT NULL").fetchall()
             referenced = {str(r["evidence_path"]) for r in rows if r["evidence_path"]}
+            referenced_names = {str(r["evidence_path"]).replace("\\", "/").rsplit("/", 1)[-1]
+                                for r in rows if r["evidence_path"]}
             for jpg in media_dir.glob("*.jpg"):
                 try:
-                    is_ref = str(jpg) in referenced or jpg.name in {
-                        Path(p).name for p in referenced}
+                    is_ref = jpg.name in referenced_names or str(jpg) in referenced
                     old = jpg.stat().st_mtime < cutoff
                     if (not is_ref) or old:
                         # Solo borra huérfanos, o referenciados viejos de FAILED ya purgados

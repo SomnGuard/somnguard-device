@@ -19,6 +19,8 @@ EVIDENCE_MAX_SIDE_PX = 640
 EVIDENCE_JPEG_QUALITY = 70
 # Severidades que generan evidencia (AC-007: >= MODERADA).
 EVIDENCE_SEVERITIES = frozenset({"MODERADA", "SEVERA", "CRITICA"})
+# Prefijo relativo portable dentro de <data_dir> (nunca absoluto en DB).
+EVIDENCE_MEDIA_DIRNAME = "media"
 
 
 def needs_evidence(severity: str | None) -> bool:
@@ -26,12 +28,70 @@ def needs_evidence(severity: str | None) -> bool:
 
 
 def media_path(data_dir: Path | str, event_id: str) -> Path:
-    return Path(data_dir) / "media" / f"{event_id}.jpg"
+    """Ruta absoluta de escritura: <data_dir>/media/<event_id>.jpg."""
+    return Path(data_dir) / EVIDENCE_MEDIA_DIRNAME / f"{event_id}.jpg"
+
+
+def evidence_relpath(event_id: str) -> str:
+    """Ruta relativa portable para guardar en DB: media/<event_id>.jpg."""
+    return f"{EVIDENCE_MEDIA_DIRNAME}/{event_id}.jpg"
+
+
+def to_relative_evidence_path(data_dir: Path | str | None,
+                              stored: str | None) -> str | None:
+    """Normaliza cualquier path legacy a relativo portable.
+
+    - ``None``/vacío → None.
+    - Ya relativo (``media/x.jpg`` o ``x.jpg``) → ``media/x.jpg``.
+    - Absoluto (``C:/.../data/media/x.jpg``, ``/var/.../x.jpg``) → ``media/x.jpg``.
+    """
+    if not stored:
+        return None
+    s = str(stored).strip().replace("\\", "/")
+    if not s:
+        return None
+    # Quita prefijos file:// y drive absolutos dejando el nombre.
+    name = s.rsplit("/", 1)[-1]
+    if not name:
+        return None
+    return f"{EVIDENCE_MEDIA_DIRNAME}/{name}"
+
+
+def resolve_evidence_path(data_dir: Path | str | None,
+                          stored: str | None) -> Path | None:
+    """Resuelve un path guardado (relativo nuevo o absoluto legacy) a absoluto.
+
+    Retorna None si no hay path. Si ``data_dir`` es None y el path es relativo,
+    retorna el relativo como Path (el llamador decide).
+    """
+    if not stored:
+        return None
+    s = str(stored).strip()
+    if not s:
+        return None
+    p = Path(s)
+    try:
+        if p.is_absolute():
+            return p
+    except Exception:
+        return Path(s)
+    if data_dir is None:
+        return p
+    # Relativo: media/x.jpg o x.jpg → <data_dir>/...
+    rel = s.replace("\\", "/")
+    if rel.startswith(f"{EVIDENCE_MEDIA_DIRNAME}/"):
+        return Path(data_dir) / rel
+    if "/" not in rel and "\\" not in s:
+        return Path(data_dir) / EVIDENCE_MEDIA_DIRNAME / rel
+    return Path(data_dir) / p
 
 
 def save_event_frame(frame: Any, event_id: str, severity: str | None,
                      data_dir: Path | str, cv2_module: Any = None) -> Optional[str]:
-    """Guarda 1 frame JPEG. Retorna ruta str o None (nunca lanza).
+    """Guarda 1 frame JPEG. Retorna path RELATIVO o None (nunca lanza).
+
+    Retorna ``media/<event_id>.jpg`` (relativo a ``data_dir``, portable entre
+    máquinas). El archivo se escribe en ``<data_dir>/media/<event_id>.jpg``.
 
     - Si ``severity`` < MODERADA → None (no se captura).
     - Si ``frame`` es None/vacío o sin ``cv2`` → None.
@@ -74,7 +134,7 @@ def save_event_frame(frame: Any, event_id: str, severity: str | None,
             return None
         if not ok:
             return None
-        return str(dest)
+        return evidence_relpath(event_id)
     except Exception as e:  # nunca bloquea el evento
         logger.debug("Evidencia omitida (%s): %s", event_id, e)
         return None

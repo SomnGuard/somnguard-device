@@ -45,3 +45,27 @@ def test_batch_limit_and_order(tmp_path):
     assert [b["id"] for b in batch] == ["ev-0", "ev-1"]
     batch150 = buf.fetch_batch(limit=500)
     assert len(batch150) == 5  # clamp a 100, pero hay 5
+
+
+def test_evidence_path_stored_relative_and_migrates_legacy(tmp_path):
+    buf = EventBuffer(tmp_path / "t.db")
+    # Absoluto legacy se normaliza al guardar
+    buf.enqueue("abs-1", {"event_id": "abs-1"},
+                "C:\\Users\\TEST\\Documents\\SomnGuard\\data\\media\\abs-1.jpg")
+    batch = buf.fetch_batch()
+    assert batch[0]["evidence_path"] == "media/abs-1.jpg"
+    # Fila legacy insertada directo en SQL se migra al abrir el buffer
+    import sqlite3
+    with sqlite3.connect(str(tmp_path / "t.db")) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO pending_events"
+            " (id, event_json, evidence_path, status, retries, created_at, updated_at)"
+            " VALUES (?,?,?,?,?,?,?)",
+            ("legacy-1", '{"event_id":"legacy-1"}',
+             "/home/pi/somnguard/data/media/legacy-1.jpg",
+             "PENDING", 0, "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+        )
+    buf2 = EventBuffer(tmp_path / "t.db")  # __init__ migra
+    rows = {b["id"]: b["evidence_path"] for b in buf2.fetch_batch(limit=100)}
+    assert rows["legacy-1"] == "media/legacy-1.jpg"
+    assert rows["abs-1"] == "media/abs-1.jpg"
