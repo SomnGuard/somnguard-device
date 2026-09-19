@@ -56,16 +56,32 @@ class SyncEngine:
                  base_delay_sec: int = BACKOFF_BASE_SEC,
                  max_delay_sec: int = BACKOFF_MAX_SEC,
                  max_retries: int = MAX_RETRIES,
-                 batch_limit: int = BATCH_LIMIT):
+                 batch_limit: int = BATCH_LIMIT,
+                 data_dir: Path | str | None = None):
         self.buffer = buffer
         self.backend = backend
         self.base_delay = base_delay_sec
         self.max_delay = max_delay_sec
         self.max_retries = max_retries
         self.batch_limit = max(1, min(100, int(batch_limit or BATCH_LIMIT)))
+        self.data_dir = Path(data_dir) if data_dir is not None else None
         # attempt -> next_retry_monotonic (backoff en memoria por lote)
         self._next_retry_monotonic: float = 0.0
         self._consecutive_failures: int = 0
+
+    def _resolve_evidence(self, stored: str | None) -> Path | None:
+        """Resuelve path guardado (relativo portable o absoluto legacy)."""
+        if not stored:
+            return None
+        try:
+            from app.capture.evidence import resolve_evidence_path
+            return resolve_evidence_path(self.data_dir, stored)
+        except Exception:
+            pass
+        p = Path(str(stored))
+        if p.is_absolute() or self.data_dir is None:
+            return p
+        return self.data_dir / p
 
     def _backoff_ready(self) -> bool:
         return time.monotonic() >= self._next_retry_monotonic
@@ -165,7 +181,10 @@ class SyncEngine:
             if not p:
                 continue
             try:
-                Path(p).unlink(missing_ok=True)
+                jpg = self._resolve_evidence(p)
+                if jpg is None:
+                    continue
+                jpg.unlink(missing_ok=True)
             except OSError:
                 continue
 
@@ -180,10 +199,9 @@ class SyncEngine:
             ev = b.get("event") if isinstance(b.get("event"), dict) else {}
             if not p or not ev.get("has_evidence"):
                 continue
-            # El archivo ya se borró arriba si confirmamos metadata; re-derivar:
-            # si no existe, skip (la limpieza manda; evidencia huérfana se purga por job).
-            jpg = Path(p)
-            if not jpg.exists():
+            # Resuelve relativo (media/x.jpg) o absoluto legacy.
+            jpg = self._resolve_evidence(p)
+            if jpg is None or not jpg.exists():
                 continue
             checksum = sha256_file(jpg)
             if not checksum:

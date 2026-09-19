@@ -98,3 +98,35 @@ def test_sync_failure_increments_retries_and_backoff(tmp_path):
     # Segundo intento inmediato bloqueado por backoff
     r2 = asyncio.run(eng.sync_once("dev", "k"))
     assert r2.get("skipped_backoff") is True
+
+
+def test_sync_resolves_relative_evidence_and_deletes(tmp_path):
+    media = tmp_path / "media"
+    media.mkdir()
+    jpg = media / "ev-rel.jpg"
+    jpg.write_bytes(b"fake-jpg")
+    buf = EventBuffer(tmp_path / "t.db")
+    buf.enqueue("ev-rel", {"event_id": "ev-rel", "has_evidence": True}, "media/ev-rel.jpg")
+
+    seen = {}
+
+    class FakeBackend:
+        async def post_events(self, device_id, api_key, events):
+            return {"acked_ids": ["ev-rel"], "duplicate_ids": []}
+
+        def parse_telemetry_ack(self, res):
+            return res
+
+        async def upload_evidence(self, device_id, api_key, event_id, path, checksum):
+            seen["path"] = path
+            assert event_id == "ev-rel"
+            assert Path(path) == jpg  # resuelto a <data_dir>/media/...
+            return {"evidence_id": "e1"}
+
+    from pathlib import Path
+    eng = SyncEngine(buf, FakeBackend(), data_dir=tmp_path)
+    res = asyncio.run(eng.sync_once("dev", "k"))
+    assert res["synced"] == 1
+    assert buf.count_pending() == 0
+    assert seen["path"] == str(jpg)
+    assert not jpg.exists()  # limpieza tras ACK
