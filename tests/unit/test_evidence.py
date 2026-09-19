@@ -1,7 +1,14 @@
 """HU-DEVICE-003 AC-007: evidencia JPEG 640px/q70, >=MODERADA, no bloquea."""
+from pathlib import Path
+
 import numpy as np
 
-from app.capture.evidence import needs_evidence, save_event_frame
+from app.capture.evidence import (
+    needs_evidence,
+    resolve_evidence_path,
+    save_event_frame,
+    to_relative_evidence_path,
+)
 
 
 class FakeCV2:
@@ -34,9 +41,25 @@ def test_save_resizes_major_side_to_640(tmp_path):
     cv2 = FakeCV2()
     frame = np.zeros((720, 1280, 3), dtype=np.uint8)  # lado mayor 1280 -> 640
     out = save_event_frame(frame, "ev-1", "MODERADA", tmp_path, cv2_module=cv2)
-    assert out is not None and out.endswith("ev-1.jpg")
+    # DB portable: relativo media/<id>.jpg, archivo real en <data_dir>/media/
+    assert out == "media/ev-1.jpg"
+    assert (tmp_path / "media" / "ev-1.jpg").exists()
     saved_shape = list(cv2.saved.values())[0][0]
     assert max(saved_shape[0], saved_shape[1]) == 640
+
+
+def test_relative_and_resolve_roundtrip(tmp_path):
+    assert to_relative_evidence_path(None, "media/ev-1.jpg") == "media/ev-1.jpg"
+    assert to_relative_evidence_path(None, "ev-1.jpg") == "media/ev-1.jpg"
+    assert to_relative_evidence_path(
+        None, "C:\\Users\\TEST\\Documents\\data\\media\\ev-1.jpg") == "media/ev-1.jpg"
+    assert to_relative_evidence_path(
+        None, "/var/lib/somnguard/data/media/ev-1.jpg") == "media/ev-1.jpg"
+    resolved = resolve_evidence_path(tmp_path, "media/ev-1.jpg")
+    assert resolved == tmp_path / "media" / "ev-1.jpg"
+    # Legacy absoluto se respeta tal cual
+    legacy = resolve_evidence_path(tmp_path, "C:/old/data/media/ev-1.jpg")
+    assert Path(legacy).name == "ev-1.jpg"
 
 
 def test_no_evidence_below_moderada(tmp_path):
