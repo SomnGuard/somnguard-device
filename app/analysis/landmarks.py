@@ -26,23 +26,27 @@ class LandmarkDetector:
         min_detection_confidence: float = 0.5,
         min_tracking_confidence: float = 0.5,
         max_num_faces: int = 1,
+        model_path: str = "models/face_landmarker.task",
     ):
-        model_path = "models/face_landmarker.task"
-        self._landmarker = mp.tasks.vision.FaceLandmarker.create_from_options(
-            mp.tasks.vision.FaceLandmarkerOptions(
-                base_options=mp.tasks.BaseOptions(
-                    model_asset_path=model_path,
-                ),
-                running_mode=mp.tasks.vision.RunningMode.LIVE_STREAM,
-                num_faces=max_num_faces,
-                min_face_detection_confidence=min_detection_confidence,
-                min_face_presence_confidence=min_tracking_confidence,
-                min_tracking_confidence=min_tracking_confidence,
-                output_face_blendshapes=False,
-                output_facial_transformation_matrixes=False,
-                result_callback=self._result_callback,
+        self.model_path = model_path
+        try:
+            self._landmarker = mp.tasks.vision.FaceLandmarker.create_from_options(
+                mp.tasks.vision.FaceLandmarkerOptions(
+                    base_options=mp.tasks.BaseOptions(
+                        model_asset_path=model_path,
+                    ),
+                    running_mode=mp.tasks.vision.RunningMode.LIVE_STREAM,
+                    num_faces=max_num_faces,
+                    min_face_detection_confidence=min_detection_confidence,
+                    min_face_presence_confidence=min_tracking_confidence,
+                    min_tracking_confidence=min_tracking_confidence,
+                    output_face_blendshapes=False,
+                    output_facial_transformation_matrixes=False,
+                    result_callback=self._result_callback,
+                )
             )
-        )
+        except Exception as e:
+            raise RuntimeError(f"No se pudo cargar {model_path}: {e}") from e
         self._latest_result: Optional[mp.tasks.vision.FaceLandmarkerResult] = None
         self._initialized = True
         logger.debug("FaceLandmarker inicializado (MediaPipe Tasks API)")
@@ -100,10 +104,21 @@ def get_key_points(landmarks: np.ndarray) -> dict[str, np.ndarray]:
     return {
         "left_eye": landmarks[[33, 160, 158, 133, 153, 144]],      # 6 pts
         "right_eye": landmarks[[362, 385, 387, 263, 373, 380]],   # 6 pts
-        "mouth": landmarks[[61, 84, 17, 314, 405, 320]],           # 6 pts
+        # Boca con apertura INTERNA (p1..p6 para la fórmula MAR):
+        # p1=61/p4=291 comisuras externas (ancho estable),
+        # p2=13/p6=14 labio interno centro (alto principal),
+        # p3=82/p5=87 labio interno izq (alto secundario).
+        # El set anterior (84/17/314/405/320, borde externo) saturaba en
+        # ~0.6 con la boca muy abierta de frente y solo subía al girar
+        # (acortamiento del ancho por perspectiva): imposible de umbralizar.
+        "mouth": landmarks[[61, 13, 82, 291, 87, 14]],             # 6 pts
         "nose_tip": landmarks[1:2],                                 # 1 pt
         "chin": landmarks[152:153],                                 # 1 pt
         "left_ear": landmarks[234:235],                             # 1 pt
         "right_ear": landmarks[454:455],                            # 1 pt
         "forehead": landmarks[10:11],                               # 1 pt
     }
+
+
+# Índices de boca en orden p1..p6 (fuente única para overlays/debug).
+MOUTH_IDX = [61, 13, 82, 291, 87, 14]

@@ -7,6 +7,7 @@ from typing import Any, Optional
 
 import numpy as np
 
+from app.analysis.ear_mar import estimate_head_pose
 from app.analysis.landmarks import FaceLandmarks, LandmarkDetector, get_key_points
 
 
@@ -33,6 +34,7 @@ class Detector:
     # thresholds llegaban vacíos).
     def __init__(self, thresholds: dict[str, Any]):
         self.thresholds = thresholds or {}
+        self._landmark_detector: Any = None
         self._fov_min_face_ratio = self.thresholds.get("fov_min_face_ratio", 0.02)
         self._fov_max_face_ratio = self.thresholds.get("fov_max_face_ratio", 0.85)
         self._obstruction_landmark_threshold = self.thresholds.get("obstruction_landmark_threshold", 0.3)
@@ -49,11 +51,12 @@ class Detector:
         
         logger.info(f"Detector umbrales: fov_min={self._fov_min_face_ratio}, fov_max={self._fov_max_face_ratio}")
 
-    async def load_model(self) -> None:
+    async def load_model(self, model_path: str = "models/face_landmarker.task") -> None:
         self._landmark_detector = LandmarkDetector(
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5,
             max_num_faces=1,
+            model_path=model_path,
         )
         logger.info("Detector inicializado con MediaPipe Face Mesh")
 
@@ -81,6 +84,26 @@ class Detector:
             fov_ok = self._check_fov(landmarks_result)
             obstructed = self._check_obstruction(landmarks_result)
 
+            # Mirada lateral intencionada NO es obstrucción: si el z-check dice
+            # obstruido pero el yaw es plausible y grande (típico mirar
+            # espejos/pasajero 30-60°), es EV-DIS-03/04, no AS-09.
+            # Solo se usa el YAW (sin sesgo: frente ≈0°); el pitch crudo trae
+            # sesgo ~+170° de solvePnP y no sirve en absoluto.
+            if obstructed:
+                try:
+                    gaze_thr = float(self.thresholds.get("gaze_deviation_deg",
+                                      self.thresholds.get("gaze_deviation_threshold", 30.0)))
+                    yaw_lim = float(self.thresholds.get("pose_yaw_limit_deg", 80.0))
+                    _, yaw, _ = estimate_head_pose(
+                        landmarks_result.landmarks, landmarks_result.image_shape)
+                    yaw = float(yaw)
+                    if abs(yaw) <= yaw_lim and abs(yaw) >= gaze_thr:
+                        logger.debug("Detector: yaw=%+.0f con z bajo -> "
+                                     "mirada lateral, no obstrucción", yaw)
+                        obstructed = False
+                except Exception:
+                    pass
+
             logger.debug("Detector: face=%s fov_ok=%s obstructed=%s bbox=%s",
                          face_present, fov_ok, obstructed, landmarks_result.bbox)
 
@@ -94,7 +117,7 @@ class Detector:
                 self._obstruction_start_time = now
                 self._last_alert_time = now
                 self._alert_stage = 0
-                logger.info("Obstrucción iniciada, timer started")
+                logger.debug("Obstrucción iniciada, timer started")
             
             elapsed = now - self._obstruction_start_time
             
@@ -123,7 +146,7 @@ class Detector:
         else:
             # Todo OK - resetear timer
             if self._obstruction_start_time is not None:
-                logger.info(f"Obstrucción resuelta tras {now - self._obstruction_start_time:.1f}s")
+                logger.debug(f"Obstrucción resuelta tras {now - self._obstruction_start_time:.1f}s")
             self._obstruction_start_time = None
             self._last_alert_time = None
             self._alert_stage = 0
