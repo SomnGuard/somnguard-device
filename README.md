@@ -5,7 +5,8 @@ Software del dispositivo SomnGuard: nodo edge basado en **Raspberry Pi / Windows
 > **Estado actual**: HU-DEVICE-002 ✅ completa (inicialización, cámara, estados, heartbeat,
 > self-register, device_config). HU-DEVICE-001 ✅ funcional (somnolencia + distracción con
 > pipeline <2s/<1s; teléfono v1 por ObjectDetector; cinturón ⛔ desactivado por flag hasta
-> validación HW). Backend HU-API-006 ✅; pendiente HU-API-005 (`GET /config` con fallback local).
+> validación HW). HU-DEVICE-003 ✅ (buffer SQLite + sync lote 100 + backoff + dedup +
+> evidencia JPEG ≥MODERADA). Backend HU-API-006 ✅; pendiente HU-API-005 (`GET /config` con fallback local).
 
 ---
 
@@ -107,7 +108,7 @@ Reinicia: `Dispositivo ya registrado: <uuid>` y **no** vuelve a hacer `self-regi
 
 ---
 
-## Estructura actual (HU-DEVICE-002 + HU-DEVICE-001)
+## Estructura actual (HU-DEVICE-002 + HU-DEVICE-001 + HU-DEVICE-003)
 
 ```
 somnguard-device/
@@ -119,10 +120,16 @@ somnguard-device/
 │   │   └── clock.py
 │   ├── device/
 │   │   ├── identity.py    # Serial/fw estables + device_id/api_key (chmod 600)
-│   │   ├── backend.py     # Cliente stdlib: self-register/heartbeat/config
-│   │   └── manager.py     # State machine + orquestación + boot <60s
+│   │   ├── backend.py     # Cliente stdlib: self-register/heartbeat/config + telemetry/evidence/health
+│   │   └── manager.py     # State machine + orquestación + boot <60s + sync loop
+│   ├── storage/
+│   │   └── buffer.py      # HU-DEVICE-003: SQLite pending_events (WAL, 7d retención)
+│   ├── sync/
+│   │   ├── connectivity.py # HU-DEVICE-003 AC-002: HEAD /actuator/health c/30s
+│   │   └── engine.py      # HU-DEVICE-003 AC-003/004/005: lote 100 + backoff + ACK cleanup
 │   ├── capture/
-│   │   └── camera.py      # OpenCV + verificación frames + fallback backend
+│   │   ├── camera.py      # OpenCV + verificación frames + fallback backend
+│   │   └── evidence.py    # HU-DEVICE-003 AC-007: JPEG 640px/q70 si ≥MODERADA
 │   ├── analysis/
 │   │   ├── landmarks.py   # MediaPipe FaceLandmarker (468 pts, model_path inyectable)
 │   │   ├── detector.py    # FOV + obstruction + escalamiento 5s/20s/pausa 30s
@@ -159,11 +166,12 @@ somnguard-device/
 ## Tests
 
 ```bash
-py -m pytest tests/ -v   # 87 tests: presencia, escalamiento AS-09, config,
+py -m pytest tests/ -v   # 121 tests: presencia, escalamiento AS-09, config,
                          # .env, identidad/credenciales, contratos HTTP, estados,
                          # somnolencia (EAR/MAR/PERCLOS/pico), distracción (gaze
                          # suavizado/calibrado/tope, teléfono, movimiento),
-                         # cinturón (desactivado), pipeline/latencias
+                         # cinturón (desactivado), pipeline/latencias,
+                         # HU-DEVICE-003 (buffer, evidencia, sync, backoff, dedup)
 ```
 
 Sin cámara ni red: dependencias pesadas (`cv2`/`mediapipe`) con stubs en
@@ -221,11 +229,24 @@ Regla práctica: habla normal pica MAR ~0.5–0.65, habla fuerte sostiene
 
 ---
 
-## Próximos pasos (HU-API-005 pendiente en backend)
+## Qué hace (HU-DEVICE-003 — buffer offline, sync y limpieza)
+
+| AC | Comportamiento |
+|----|----------------|
+| **AC-001** | `app/storage/buffer.py`: SQLite WAL `data/db/somnguard_local.db`, tabla `pending_events(id=event_id UUIDv7, event_json, evidence_path, status PENDING/SENDING/FAILED, retries, created_at/updated_at)` |
+| **AC-002** | `app/sync/connectivity.py` + `_sync_loop`: `HEAD /actuator/health` c/`sync_interval_sec` (30s); `OFFLINE→ONLINE` resetea backoff y dispara sync inmediato |
+| **AC-003** | `app/sync/engine.py`: lote máx 100 a `POST /api/v1/telemetry/events {"events":[]}`; backoff `min(60*2^n+jitter30,3600)`, máx 10 reintentos |
+| **AC-004** | `event_id` UUIDv7 (`models.new_event_id()`); `201 {acked_ids,duplicate_ids}` — ambos se borran local, duplicados no son error |
+| **AC-005** | Limpieza `DELETE` tras ACK + borra JPG; job diario purga `FAILED` >7d y JPGs huérfanos/antiguos |
+| **AC-006** | `_check_storage_crit`: uso >90% → `AS-09` (cooldown 1/día) + purga `FAILED`/evidencia; `pending_count` real en heartbeat |
+| **AC-007** | `app/capture/evidence.py`: si severidad ≥MODERADA guarda 1 JPEG 640px/q70 en `data/media/<event_id>.jpg`; fallo → evento sin evidencia (no bloquea) |
+
+---
+
+## Próximos pasos
 
 1. Backend HU-API-005 ya expone `GET /devices/{id}/config` y `POST /devices/{id}/config/refresh` + `config_pending` en `heartbeat`. El device solo pulla cuando el heartbeat avisa `pending=true` (flujo manual).
-2. `HU-DEVICE-003` informará `pending_count` real en el heartbeat.
-3. `pip install -e ".[full]"` para `simpleaudio` en Linux (volumen real;
+2. `pip install -e ".[full]"` para `simpleaudio` en Linux (volumen real;
    `winsound` en Windows no soporta volumen).
 
 ---

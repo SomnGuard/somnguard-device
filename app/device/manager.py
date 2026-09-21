@@ -1,4 +1,5 @@
-"""Orquestación del dispositivo: inicialización, estados y backend (HU-DEVICE-002).
+"""Orquestación del dispositivo: inicialización, estados y backend
+(HU-DEVICE-002 + HU-DEVICE-003 buffer offline/sync/evidencia).
 
 Flujo de arranque (AC-001, presupuesto < 60s RNF-1.1):
   sonido -> cámara (AS-08 ok / AS-09 error) -> modelo visión (AS-09 degradado
@@ -61,6 +62,7 @@ from app.capture.camera import Camera, CameraError
 from app.analysis.detector import Detector, DetectionResult
 from app.monitoring.presence import PresenceMonitor
 from app.alerting.sound_player import SoundPlayer
+from app.common.models import build_telemetry_event, new_event_id
 
 try:
     from app.analysis.pipeline import VisionPipeline
@@ -79,6 +81,10 @@ SELF_REGISTER_RETRY_DELAY_SEC = 2.0
 SELF_REGISTER_BG_RETRY_SEC = 60.0
 INITIAL_FACE_CHECK_FRAMES = 3
 DETECTOR_RETRY_SEC = 30.0
+# HU-DEVICE-003: almacenamiento crítico y retención.
+STORAGE_CRIT_USED_PCT = 90
+STORAGE_ALERT_COOLDOWN_SEC = 86400.0  # AS-09 por disco lleno: máx 1/día
+RETENTION_CHECK_SEC = 86400.0  # job purga FAILED/evidencia 7d: 1/día
 
 
 @dataclass
@@ -101,6 +107,12 @@ class DeviceContext:
     last_register_attempt: float = 0.0
     last_detector_retry: float = 0.0
     last_config_pull: float = 0.0
+    # HU-DEVICE-003: buffer/sync (se crean en __init__; None en tests legacy).
+    buffer: Optional[object] = None
+    sync_engine: Optional[object] = None
+    connectivity: Optional[object] = None
+    last_retention_monotonic: float = 0.0
+    last_storage_alert_monotonic: float = 0.0
 
 
 class DeviceManager:
@@ -129,8 +141,47 @@ class DeviceManager:
             ),
             boot_start_monotonic=time.monotonic(),
         )
+        self._init_edge_sync()
         self._shutdown = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
+
+    def _init_edge_sync(self) -> None:
+        """Crea buffer SQLite + motor sync + monitor conectividad (HU-DEVICE-003).
+
+        Best-effort: si el disco falla, el device sigue operando sin buffer
+        (los eventos solo se loguean) en vez de abortar el arranque.
+        """
+        try:
+            from app.storage.buffer import EventBuffer
+            from app.sync.connectivity import ConnectivityMonitor
+            from app.sync.engine import SyncEngine
+            db_path = data_dir() / "db" / "somnguard_local.db"
+            self.ctx.buffer = EventBuffer(db_path)
+            self.ctx.sync_engine = SyncEngine(
+                self.ctx.buffer, self.ctx.backend,
+                batch_limit=100,
+                data_dir=data_dir(),
+            )
+            self.ctx.connectivity = ConnectivityMonitor(
+                self.ctx.backend,
+                interval_sec=int(getattr(self.ctx.config, "sync_interval_sec", 30) or 30),
+                on_online=self._on_reconnected,
+            )
+            logger.info("Buffer offline listo: %s", db_path)
+        except Exception as e:
+            logger.error("Buffer offline no disponible (%s): eventos solo en log", e)
+            self.ctx.buffer = None
+            self.ctx.sync_engine = None
+            self.ctx.connectivity = None
+
+    def _on_reconnected(self) -> None:
+        """Callback OFFLINE→ONLINE: reset backoff para sync inmediato."""
+        try:
+            eng = getattr(self.ctx, "sync_engine", None)
+            if eng is not None and hasattr(eng, "_register_success"):
+                eng._register_success()
+        except Exception:
+            pass
 
     # -- arranque ------------------------------------------------------
     async def initialize(self) -> None:
@@ -535,6 +586,7 @@ class DeviceManager:
         self._tasks = [
             asyncio.create_task(self._capture_loop(), name="capture"),
             asyncio.create_task(self._heartbeat_loop(), name="heartbeat"),
+            asyncio.create_task(self._sync_loop(), name="sync"),
         ]
         try:
             await self._shutdown.wait()
@@ -645,6 +697,13 @@ class DeviceManager:
         if not events:
             return
 
+        # HU-DEVICE-003: buffer offline SIEMPRE (antes del árbitro de sonido,
+        # que puede hacer `return` temprano y saltaría el enqueue).
+        try:
+            await self._enqueue_events(events, frame)
+        except Exception as e:
+            logger.debug("Enqueue buffer fallido (evento solo en log): %s", e)
+
         # Todos los eventos se loguean; pero suena UNO solo por lote: el de
         # mayor severidad. Un mismo movimiento (p.ej. tilt lateral) dispara
         # AS-03 + AS-06 a ~100ms y dos pitidos encimados solo agregan ruido;
@@ -696,6 +755,68 @@ class DeviceManager:
         except Exception as e:
             logger.debug("Alerta %s no sonó: %s", alert_code, e)
 
+    async def _enqueue_events(self, events: list, frame=None) -> int:
+        """HU-DEVICE-003 AC-001/AC-007: persiste cada evento + evidencia local.
+
+        - Genera ``event_id`` UUID v7 si falta (idempotencia global).
+        - Guarda 1 frame JPEG si severidad >= MODERADA (no bloquea).
+        - ``evidence_path`` en DB es RELATIVO ``media/<id>.jpg`` (portable;
+          se resuelve a <data_dir>/... solo al subir/borrar).
+        - INSERT en ``pending_events`` (WAL, sobrevive reinicio).
+        Retorna nº encolados. Sin buffer (tests legacy) = 0 sin error.
+        """
+        buf = getattr(self.ctx, "buffer", None)
+        if buf is None:
+            return 0
+        try:
+            from app.capture.evidence import save_event_frame
+        except Exception:
+            save_event_frame = None  # type: ignore
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        device_id = getattr(self.ctx.identity, "device_id", "") or ""
+        try:
+            ddir = data_dir()
+        except Exception:
+            ddir = None
+        enqueued = 0
+        for ev in events:
+            if not isinstance(ev, dict):
+                continue
+            try:
+                eid = str(ev.get("event_id") or new_event_id())
+                ev.setdefault("event_id", eid)
+                severity = str(ev.get("severity", "INFO"))
+                evidence_path = None
+                if save_event_frame is not None and ddir is not None:
+                    try:
+                        if loop is not None:
+                            # cv2.imwrite bloquea ~10-30ms: va a executor.
+                            evidence_path = await loop.run_in_executor(
+                                None, lambda e=eid, s=severity, f=frame:
+                                save_event_frame(f, e, s, ddir))
+                        else:
+                            evidence_path = save_event_frame(frame, eid, severity, ddir)
+                    except Exception:
+                        evidence_path = None
+                telemetry = build_telemetry_event(
+                    ev, device_id=device_id, event_id=eid,
+                    has_evidence=bool(evidence_path))
+                # has_evidence real para fase 2 (el detector no lo sabe).
+                if evidence_path:
+                    telemetry["has_evidence"] = True
+                ok = buf.enqueue(eid, telemetry, evidence_path)
+                if ok:
+                    enqueued += 1
+            except Exception as e:
+                logger.debug("Enqueue evento fallido: %s", e)
+                continue
+        if enqueued:
+            logger.debug("Buffer: %d evento(s) encolados", enqueued)
+        return enqueued
+
     async def _heartbeat_loop(self) -> None:
         while self.ctx.running:
             interval = self.ctx.config.heartbeat_interval_sec
@@ -732,13 +853,148 @@ class DeviceManager:
         except OSError:
             free_pct = 100
         uptime = int(time.monotonic() - self.ctx.boot_start_monotonic)
+        # HU-DEVICE-003 AC-002/AC-006: pending real del buffer (0 si no hay).
+        try:
+            buf = getattr(self.ctx, "buffer", None)
+            pending = int(buf.count_pending()) if buf is not None else 0
+        except Exception:
+            pending = 0
         return HeartbeatPayload(
             device_id=self.ctx.identity.device_id,
             firmware_version=self.ctx.identity.firmware_version,
-            pending_count=0,  # HU-DEVICE-003: buffer offline informará aquí
+            pending_count=max(0, pending),
             free_disk_pct=free_pct,
             uptime_s=uptime,
         )
+
+    # -- HU-DEVICE-003: sync automático + retención + storage ------------
+    async def _sync_loop(self) -> None:
+        """HEAD cada sync_interval_sec; online → sync lote (AC-002/AC-003)."""
+        # Intervalo inicial para no competir con el arranque.
+        await asyncio.sleep(5.0)
+        while self.ctx.running:
+            try:
+                interval = int(getattr(self.ctx.config, "sync_interval_sec", 30) or 30)
+            except (TypeError, ValueError):
+                interval = 30
+            interval = min(3600, max(5, interval))
+            await self._sleep_interruptible(interval)
+            if not self.ctx.running:
+                break
+            try:
+                await self._check_storage_crit()
+            except Exception as e:
+                logger.debug("Storage check fallido: %s", e)
+            try:
+                await self._run_retention_if_due()
+            except Exception as e:
+                logger.debug("Retención fallida: %s", e)
+            if not self.ctx.identity.has_credentials():
+                continue
+            eng = getattr(self.ctx, "sync_engine", None)
+            if eng is None:
+                continue
+            # Puerta de conectividad: HEAD sin auth (no confunde con heartbeat).
+            try:
+                online = await self.ctx.backend.healthcheck()
+            except Exception:
+                online = False
+            # Actualiza monitor (dispara reset backoff en OFFLINE→ONLINE).
+            try:
+                conn = getattr(self.ctx, "connectivity", None)
+                if conn is not None:
+                    conn.online = True if online else False
+                    if online and getattr(conn, "_was_offline", False):
+                        self._on_reconnected()
+                    conn._was_offline = not online
+            except Exception:
+                pass
+            if not online:
+                if getattr(self.ctx, "backend_available", True):
+                    await self._enter_offline("healthcheck sin respuesta")
+                continue
+            await self._do_sync_batch()
+
+    async def _do_sync_batch(self) -> dict:
+        """Un lote 100 → POST → limpieza ACK. Retorna resumen (nunca lanza)."""
+        eng = getattr(self.ctx, "sync_engine", None)
+        if eng is None or not self.ctx.identity.has_credentials():
+            return {"synced": 0, "skipped": True}
+        try:
+            retention = int(getattr(self.ctx.config, "retention_days", 7) or 7)
+        except (TypeError, ValueError):
+            retention = 7
+        try:
+            res = await eng.sync_once(
+                self.ctx.identity.device_id, self.ctx.identity.api_key,
+                retention_days=retention)
+        except Exception as e:
+            logger.debug("Sync batch fallido: %s", e)
+            return {"synced": 0, "error": str(e)}
+        # Si había OFFLINE y el sync pasó, el próximo heartbeat recupera estado.
+        if res.get("synced"):
+            self.ctx.backend_available = True
+        return res
+
+    async def _check_storage_crit(self) -> None:
+        """AC-006: uso >90% → AS-09 (cooldown 1/día) + purga FAILED antiguos."""
+        try:
+            usage = shutil.disk_usage(data_dir())
+            used_pct = 100 - int(usage.free * 100 / usage.total) if usage.total else 0
+        except OSError:
+            return
+        if used_pct < STORAGE_CRIT_USED_PCT:
+            return
+        buf = getattr(self.ctx, "buffer", None)
+        if buf is not None:
+            try:
+                buf.purge_old_failed(retention_days=0)  # FAILED más antiguos primero
+            except Exception:
+                pass
+            try:
+                from pathlib import Path as _P
+                buf.purge_old_evidence_files(_P(data_dir()) / "media", retention_days=7)
+            except Exception:
+                pass
+        now_m = time.monotonic()
+        last = float(getattr(self.ctx, "last_storage_alert_monotonic", 0.0) or 0.0)
+        if (now_m - last) < STORAGE_ALERT_COOLDOWN_SEC:
+            return
+        self.ctx.last_storage_alert_monotonic = now_m
+        logger.warning("Almacenamiento al %d%% (>90%%): AS-09 + purga FAILED/evidencia 7d",
+                       used_pct)
+        try:
+            await self._play_error_alert()
+        except Exception:
+            pass
+
+    async def _run_retention_if_due(self) -> None:
+        """AC-005/AC-006: purga diaria FAILED 7d + JPGs huérfanos/antiguos."""
+        now_m = time.monotonic()
+        last = float(getattr(self.ctx, "last_retention_monotonic", 0.0) or 0.0)
+        if (now_m - last) < RETENTION_CHECK_SEC and last > 0:
+            return
+        self.ctx.last_retention_monotonic = now_m
+        buf = getattr(self.ctx, "buffer", None)
+        if buf is None:
+            return
+        try:
+            retention = int(getattr(self.ctx.config, "retention_days", 7) or 7)
+        except (TypeError, ValueError):
+            retention = 7
+        try:
+            n = buf.purge_old_failed(retention_days=retention)
+            if n:
+                logger.info("Retención: %d FAILED >%dd purgados", n, retention)
+        except Exception:
+            pass
+        try:
+            from pathlib import Path as _P
+            m = buf.purge_old_evidence_files(_P(data_dir()) / "media", retention_days=retention)
+            if m:
+                logger.info("Retención: %d JPGs purgados", m)
+        except Exception:
+            pass
 
     async def _heartbeat_once(self) -> None:
         payload = self._heartbeat_payload().to_request_dict()
