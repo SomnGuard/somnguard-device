@@ -132,19 +132,29 @@ class SyncEngine:
             # Si la API no devuelve ids (mock), asumir todo el lote confirmado
             if not confirmed and not acked and not dup:
                 confirmed = list(ids)
+            # Fase 2 ANTES de borrar: sube JPGs de los confirmados.
+            # Solo se borra la fila local cuando metadata + evidencia están
+            # OK. Si se borrara antes, un apagón dejaría el evento en la API
+            # sin imagen y sin posibilidad de reintento (bug reportado).
+            # Reenviar metadata es seguro: la API responde duplicate_ids.
+            ev_ok, ev_failed = await self._upload_evidences_best_effort(
+                device_id, api_key, batch, confirmed)
+            failed_set = set(ev_failed)
+            fully_done = [i for i in confirmed if i not in failed_set]
             try:
-                self.buffer.mark_acknowledged(confirmed)
+                self.buffer.mark_acknowledged(fully_done)
             except Exception:
                 pass
-            # Fase 2 primero (usa los JPGs), luego borra remanentes.
-            # Orden importa: si borráramos antes, la subida nunca encontraría el archivo.
-            await self._upload_evidences_best_effort(device_id, api_key, batch, confirmed)
-            self._delete_evidence_files(batch, confirmed)
-            # Fallidos = enviados pero no confirmados (p.ej. 422 parcial)
+            self._delete_evidence_files(batch, fully_done)
+            # Fallidos = no confirmados (p.ej. 422 parcial) + confirmados
+            # cuya evidencia quedó pendiente (reintentan metadata como
+            # duplicate + evidencia de nuevo; tras max_retries pasan a
+            # FAILED y se purgan a los 7d como evento sin evidencia).
             unconfirmed = [i for i in ids if i not in set(confirmed)]
-            if unconfirmed:
+            retry = unconfirmed + list(ev_failed)
+            if retry:
                 try:
-                    self.buffer.mark_failed(unconfirmed, self.max_retries)
+                    self.buffer.mark_failed(retry, self.max_retries)
                 except Exception:
                     pass
             try:
@@ -152,10 +162,12 @@ class SyncEngine:
             except Exception:
                 pass
             self._register_success()
-            logger.info("Sync OK: %d confirmados (%d dup), %d pendientes de reintento",
-                        len(confirmed), len(dup), len(unconfirmed))
-            return {"synced": len(confirmed), "duplicates": len(dup),
-                    "failed": len(unconfirmed), "acked_ids": confirmed}
+            logger.info("Sync OK: %d confirmados (%d dup), %d pendientes de reintento "
+                        "(%d evidencia pendiente)",
+                        len(fully_done), len(dup), len(retry), len(ev_failed))
+            return {"synced": len(fully_done), "duplicates": len(dup),
+                    "failed": len(retry), "acked_ids": fully_done,
+                    "evidence_pending": list(ev_failed)}
         except Exception as e:
             try:
                 self.buffer.mark_failed(ids, self.max_retries)
@@ -189,31 +201,52 @@ class SyncEngine:
                 continue
 
     async def _upload_evidences_best_effort(self, device_id: str, api_key: str,
-                                            batch: list[dict], confirmed: list[str]) -> int:
+                                             batch: list[dict], confirmed: list[str]) -> tuple[list[str], list[str]]:
+        """Sube JPGs de los confirmados. Retorna (ok_ids, failed_ids).
+
+        - Sin evidencia requerida (sin path o has_evidence falsy) → ok.
+        - JPG ausente localmente → ok (se da por perdida la imagen para no
+          reintentar para siempre; el evento ya quedó en la API).
+        - Upload 201/409 → ok (409 = ya existe, no reintentar).
+        - Fichero ilegible o excepción de red/backend → failed (reintenta
+          luego junto a metadata como duplicate).
+        El JPG solo se borra aquí tras upload OK; el resto lo borra
+        ``_delete_evidence_files`` tras el ACK final.
+        """
         ok = set(confirmed)
-        uploaded = 0
+        ok_ids: list[str] = []
+        failed_ids: list[str] = []
+        if not hasattr(self.backend, "upload_evidence"):
+            return list(confirmed), []
         for b in batch:
             if b["id"] not in ok:
                 continue
             p = b.get("evidence_path")
             ev = b.get("event") if isinstance(b.get("event"), dict) else {}
             if not p or not ev.get("has_evidence"):
+                ok_ids.append(b["id"])
                 continue
             # Resuelve relativo (media/x.jpg) o absoluto legacy.
             jpg = self._resolve_evidence(p)
             if jpg is None or not jpg.exists():
+                logger.warning("Evidencia %s sin JPG local (%s): se confirma "
+                               "evento sin imagen", b["id"], p)
+                ok_ids.append(b["id"])
                 continue
             checksum = sha256_file(jpg)
             if not checksum:
+                logger.debug("Evidencia %s ilegible (reintento luego)", b["id"])
+                failed_ids.append(b["id"])
                 continue
             try:
                 await self.backend.upload_evidence(device_id, api_key, b["id"], str(jpg), checksum)
-                uploaded += 1
+                ok_ids.append(b["id"])
                 try:
                     jpg.unlink(missing_ok=True)
                 except OSError:
                     pass
             except Exception as e:
                 logger.debug("Evidencia %s no subida (reintento luego): %s", b["id"], e)
+                failed_ids.append(b["id"])
                 continue
-        return uploaded
+        return ok_ids, failed_ids
