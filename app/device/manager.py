@@ -1059,7 +1059,10 @@ class DeviceManager:
                 pass
             try:
                 from pathlib import Path as _P
-                buf.purge_old_evidence_files(_P(data_dir()) / "media", retention_days=7)
+                # retention 0: borra huérfanos de cualquier edad (los FAILED
+                # recién purgados liberan disco ya). Nunca toca JPGs
+                # referenciados por filas vivas (reintento de evidencia).
+                buf.purge_old_evidence_files(_P(data_dir()) / "media", retention_days=0)
             except Exception:
                 pass
         now_m = time.monotonic()

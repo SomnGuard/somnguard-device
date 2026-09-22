@@ -60,6 +60,12 @@ class EventBuffer:
             self.migrate_absolute_evidence_paths()
         except Exception:
             pass
+        # Crash-recovery: filas que quedaron SENDING por corte de energía
+        # (entre mark_sending y ACK/FAIL) vuelven a PENDING para reintento.
+        try:
+            self.recover_stuck_sending()
+        except Exception:
+            pass
 
     # -- schema ------------------------------------------------------
     def _connect(self) -> sqlite3.Connection:
@@ -158,6 +164,25 @@ class EventBuffer:
         except OSError as e:
             logger.debug("mark_sending fallido: %s", e)
 
+    def recover_stuck_sending(self) -> int:
+        """Crash-recovery: SENDING → PENDING (corte entre envío y ACK).
+
+        Retorna nº de filas recuperadas. Sin esto, un apagón tras
+        ``mark_sending`` deja filas varadas que ``fetch_batch`` (solo
+        PENDING) nunca vuelve a traer.
+        """
+        try:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    "UPDATE pending_events SET status='PENDING', updated_at=?"
+                    " WHERE status='SENDING'",
+                    (_utcnow_iso(),),
+                )
+                return cur.rowcount or 0
+        except OSError as e:
+            logger.debug("recover_stuck_sending fallido: %s", e)
+            return 0
+
     def mark_acknowledged(self, ids: list[str]) -> int:
         """DELETE inmediato tras ACK 201 (acked + duplicate). Retorna borrados."""
         if not ids:
@@ -224,6 +249,11 @@ class EventBuffer:
         Compara por NOMBRE de archivo (robusto a paths relativos nuevos y
         absolutos legacy): ``media/ev.jpg`` y ``C:/.../media/ev.jpg`` cuentan
         como el mismo.
+
+        NUNCA borra un JPG referenciado por una fila pendiente: la evidencia
+        se borra solo tras upload OK (SyncEngine). Si se borrara aquí, un
+        reintento de evidencia fallaría para siempre. Los JPGs de filas ya
+        purgadas se vuelven huérfanos y se limpian aquí por antigüedad.
         """
         removed = 0
         try:
@@ -241,12 +271,16 @@ class EventBuffer:
             for jpg in media_dir.glob("*.jpg"):
                 try:
                     is_ref = jpg.name in referenced_names or str(jpg) in referenced
+                    if is_ref:
+                        # Referenciado por fila viva → conservar (reintento
+                        # de evidencia lo necesita). Se borra vía
+                        # SyncEngine tras upload OK, o aquí cuando la fila
+                        # ya no exista (huérfano).
+                        continue
                     old = jpg.stat().st_mtime < cutoff
-                    if (not is_ref) or old:
-                        # Solo borra huérfanos, o referenciados viejos de FAILED ya purgados
-                        if not is_ref or old:
-                            jpg.unlink(missing_ok=True)
-                            removed += 1
+                    if old:
+                        jpg.unlink(missing_ok=True)
+                        removed += 1
                 except OSError:
                     continue
         except OSError as e:
