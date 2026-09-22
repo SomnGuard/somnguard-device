@@ -3,12 +3,14 @@ import os
 import json
 from pathlib import Path
 from typing import Any
-from .models import DeviceConfig, SoundPattern, AlertCode
+from .models import DEFAULT_VOLUME_SCALE, DeviceConfig, SoundPattern, AlertCode
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).parent.parent.parent / "config" / "device.default.json"
 
-# Claves remotas aceptadas en GET /devices/{id}/config (HU-API-005 / RF-TEL-05).
+# Claves remotas aceptadas en GET /devices/{id}/config (HU-API-005 / RF-TEL-05
+# + HU-DEVICE-004 AC-001/AC-003: event_sound_map del catálogo HU-API-004 y
+# volume_pct alias de volume_scale según ADR-011).
 # Todo lo desconocido se ignora (compatibilidad hacia adelante).
 REMOTE_CONFIG_KEYS = frozenset({
     "sensitivity",
@@ -21,6 +23,8 @@ REMOTE_CONFIG_KEYS = frozenset({
     "detection_thresholds",
     "sound_patterns",
     "volume_scale",
+    "volume_pct",
+    "event_sound_map",
 })
 
 
@@ -109,9 +113,121 @@ def redact_secrets(data: dict[str, Any]) -> dict[str, Any]:
     return redacted
 
 
+def _resolve_volume_scale(override: dict[str, Any], base_scale: float) -> float:
+    """HU-DEVICE-004 AC-003: volume_pct (0-100) y volume_scale (0.0-1.0).
+
+    La API (ADR-011) expone ambos; volume_pct prevalece si viene válido.
+    Fuera de rango o inválido -> conserva base (el sanitize acota de todos modos).
+    """
+    pct = override.get("volume_pct", None)
+    if pct is not None:
+        try:
+            pct_f = float(pct)
+            if 0 <= pct_f <= 100:
+                return pct_f / 100.0
+        except (ValueError, TypeError):
+            pass
+    scale = override.get("volume_scale", None)
+    if scale is not None:
+        try:
+            return float(scale)
+        except (ValueError, TypeError):
+            pass
+    return base_scale
+
+
+def _merge_event_sound_map(base_map: dict[str, Any] | None,
+                           remote_map: Any) -> dict[str, str]:
+    """HU-DEVICE-004 AC-001: fusiona override EV->AS del catálogo.
+
+    Solo conserva entradas con código AS-XX válido; el resto se ignora
+    (compatibilidad + robustez ante catálogo corrupto).
+    """
+    merged = dict(base_map or {})
+    if isinstance(remote_map, dict):
+        for ev_code, as_code in remote_map.items():
+            if not isinstance(ev_code, str) or not isinstance(as_code, str):
+                continue
+            try:
+                AlertCode(as_code.strip())
+            except ValueError:
+                continue
+            merged[ev_code.strip()] = as_code.strip()
+    return merged
+
+
+def extract_config_version(remote: dict[str, Any] | None) -> int:
+    """ADR-011: versión global desde GET /config (plano o en sources).
+
+    La API (DeviceConfigResponse) entrega `version` plano +
+    `sources{global_version,...}`. Retorna 0 si no hay versión válida.
+    """
+    if not isinstance(remote, dict):
+        return 0
+    for key in ("version", "global_version", "globalVersion"):
+        try:
+            v = int(remote.get(key))  # type: ignore[arg-type]
+            if v > 0:
+                return v
+        except (TypeError, ValueError):
+            pass
+    sources = remote.get("sources")
+    if isinstance(sources, dict):
+        for key in ("global_version", "globalVersion", "version"):
+            try:
+                v = int(sources.get(key))  # type: ignore[arg-type]
+                if v > 0:
+                    return v
+            except (TypeError, ValueError):
+                pass
+    # Envolventes {"config": {...}} / {"data": {...}}.
+    for wrapper in ("config", "data", "device_config"):
+        inner = remote.get(wrapper)
+        if isinstance(inner, dict):
+            v = extract_config_version(inner)
+            if v > 0:
+                return v
+    return 0
+
+
+def resolve_alert_code(config: DeviceConfig, event_type_id: str,
+                       default_code: AlertCode) -> AlertCode:
+    """HU-DEVICE-004 AC-001: override remoto EV->AS con fallback local.
+
+    Si `event_sound_map` trae el evento con un AS-XX válido, manda el catálogo
+    (HU-API-004); si no, se conserva el código local de severity.EVENT_TABLE.
+    """
+    try:
+        mapped = (config.event_sound_map or {}).get(event_type_id)
+    except AttributeError:
+        return default_code
+    if isinstance(mapped, str):
+        try:
+            return AlertCode(mapped.strip())
+        except ValueError:
+            pass
+    return default_code
+
+
 def merge_configs(base: DeviceConfig, override: dict[str, Any]) -> DeviceConfig:
     if not override:
         return base
+
+    # Desenvuelve {"config"/"data"/"device_config": {...}} si trae claves conocidas.
+    if isinstance(override, dict):
+        for wrapper in ("config", "data", "device_config"):
+            inner = override.get(wrapper)
+            if isinstance(inner, dict) and any(k in REMOTE_CONFIG_KEYS for k in inner):
+                # Fusiona envolvente + plano (plano manda ante colisión).
+                fused = dict(inner)
+                for k, v in override.items():
+                    if k not in ("config", "data", "device_config"):
+                        fused[k] = v
+                override = fused
+                break
+
+    # ADR-011: versión ANTES de filtrar (version/sources no están en REMOTE_KEYS).
+    remote_version = extract_config_version(override)
 
     # Solo claves conocidas (ignora resto para compatibilidad con API futura).
     override = {k: v for k, v in override.items() if k in REMOTE_CONFIG_KEYS}
@@ -136,25 +252,52 @@ def merge_configs(base: DeviceConfig, override: dict[str, Any]) -> DeviceConfig:
         "buffer_limit_mb": override.get("buffer_limit_mb", base.buffer_limit_mb),
         "retention_days": override.get("retention_days", base.retention_days),
         "detection_thresholds": merged_thresholds,
-        "volume_scale": override.get("volume_scale", base.volume_scale),
+        # HU-DEVICE-004 AC-003: volume_pct (API) prevalece sobre volume_scale.
+        "volume_scale": _resolve_volume_scale(override, base.volume_scale),
         "sound_patterns": base.sound_patterns.copy(),
+        # HU-DEVICE-004 AC-001: event_sound_map se fusiona (no reemplaza).
+        "event_sound_map": _merge_event_sound_map(
+            getattr(base, "event_sound_map", None), override.get("event_sound_map")),
+        # ADR-011: conserva la mayor versión vista (nunca retrocede).
+        "applied_config_version": max(
+            int(getattr(base, "applied_config_version", 0) or 0),
+            remote_version,
+        ),
     }
 
     if "sound_patterns" in override:
-        for code_str, pattern_data in override["sound_patterns"].items():
-            try:
-                alert_code = AlertCode(code_str)
+        sp_override = override["sound_patterns"]
+        if isinstance(sp_override, dict):
+            for code_str, pattern_data in sp_override.items():
+                if not isinstance(pattern_data, dict):
+                    continue
+                try:
+                    alert_code = AlertCode(code_str)
+                except ValueError:
+                    continue
+                # La API envía duration_sec/interval_sec ya convertidos, pero se
+                # aceptan aliases duration_ms/interval_ms por robustez.
+                try:
+                    duration_sec = float(pattern_data.get(
+                        "duration_sec",
+                        float(pattern_data.get("duration_ms", 500)) / 1000.0
+                        if "duration_ms" in pattern_data else 0.5))
+                    interval_sec = float(pattern_data.get(
+                        "interval_sec",
+                        float(pattern_data.get("interval_ms", 0)) / 1000.0
+                        if "interval_ms" in pattern_data else 0.0))
+                except (ValueError, TypeError):
+                    continue
                 config_dict["sound_patterns"][alert_code] = SoundPattern(
                     alert_code=alert_code,
-                    frequency_hz=pattern_data.get("frequency_hz", 800),
-                    duration_sec=pattern_data.get("duration_sec", 0.5),
-                    repetitions=pattern_data.get("repetitions", 1),
-                    interval_sec=pattern_data.get("interval_sec", 0.0),
-                    loop=pattern_data.get("loop", False),
-                    volume=pattern_data.get("volume", 0.5),
+                    frequency_hz=int(pattern_data.get("frequency_hz", 800) or 800),
+                    duration_sec=duration_sec,
+                    repetitions=int(pattern_data.get("repetitions", 1) or 0),
+                    interval_sec=interval_sec,
+                    loop=bool(pattern_data.get(
+                        "loop", int(pattern_data.get("repetitions", 1) or 1) == 0)),
+                    volume=float(pattern_data.get("volume", 0.5) or 0.5),
                 )
-            except ValueError:
-                pass
 
     return DeviceConfig(**config_dict)
 
@@ -176,6 +319,19 @@ def _parse_config(data: dict[str, Any]) -> DeviceConfig:
         except ValueError:
             continue
 
+    # HU-DEVICE-004 AC-003: volume_pct alias + default 80% (ADR-011).
+    try:
+        if data.get("volume_pct") is not None:
+            _vol = min(100.0, max(0.0, float(data.get("volume_pct")))) / 100.0
+        else:
+            _vol = float(data.get("volume_scale", DEFAULT_VOLUME_SCALE))
+    except (ValueError, TypeError):
+        _vol = DEFAULT_VOLUME_SCALE
+    # HU-DEVICE-004 AC-001: event_sound_map local (default {} = tabla local).
+    _esm = data.get("event_sound_map") if isinstance(
+        data.get("event_sound_map"), dict) else {}
+    _esm = _merge_event_sound_map(None, _esm)
+
     return DeviceConfig(
         sensitivity=data.get("sensitivity", "medium"),
         camera_resolution=tuple(data.get("camera_resolution", [1280, 720])),
@@ -186,7 +342,9 @@ def _parse_config(data: dict[str, Any]) -> DeviceConfig:
         buffer_limit_mb=data.get("buffer_limit_mb", 2048),
         retention_days=data.get("retention_days", 7),
         detection_thresholds=data.get("detection_thresholds", {}),
-        volume_scale=float(data.get("volume_scale", 1.0)),
+        volume_scale=_vol,
+        event_sound_map=_esm,
+        applied_config_version=int(data.get("applied_config_version", 0) or 0),
     )
 
 
@@ -233,7 +391,17 @@ def _sanitize_config(config: DeviceConfig) -> DeviceConfig:
     try:
         config.volume_scale = min(1.0, max(0.0, float(config.volume_scale)))
     except (ValueError, TypeError):
-        config.volume_scale = 1.0
+        config.volume_scale = DEFAULT_VOLUME_SCALE
+    # HU-DEVICE-004 AC-001/AC-003: sanea event_sound_map y versión.
+    if not isinstance(getattr(config, "event_sound_map", None), dict):
+        config.event_sound_map = {}
+    else:
+        config.event_sound_map = _merge_event_sound_map(None, config.event_sound_map)
+    try:
+        config.applied_config_version = max(0, int(
+            getattr(config, "applied_config_version", 0) or 0))
+    except (ValueError, TypeError):
+        config.applied_config_version = 0
     if not isinstance(config.detection_thresholds, dict):
         config.detection_thresholds = {}
     th = config.detection_thresholds
@@ -294,6 +462,10 @@ def _sanitize_config(config: DeviceConfig) -> DeviceConfig:
     _clamp("belt_no_detection_sec", 3, 60, 10.0)
     _clamp("frame_budget_sec", 0.5, 5.0, 2.0)
     _clamp("alert_priority_window_sec", 0.0, 30.0, 5.0)
+    # HU-DEVICE-004 AC-002/AC-004: escalamiento y cola configurables.
+    _clamp("escalation_interval_sec", 5.0, 60.0, 10.0)
+    _clamp("escalation_reset_sec", 1.0, 30.0, 5.0)
+    _clamp("alert_queue_max", 1, 50, 10)
     return config
 
 
