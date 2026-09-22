@@ -6,6 +6,8 @@
   "heartbeat_interval_sec": 30,
   "buffer_limit_mb": 2048,
   "retention_days": 7,
+  "volume_scale": 0.8,
+  "event_sound_map": {},
   "detection_thresholds": {
     "perclos_threshold": 0.25,
     "perclos_window_sec": 60,
@@ -59,7 +61,10 @@
     "obstruction_landmark_threshold": 0.3,
     "frame_budget_sec": 2.0,
     "alarm_latency_sec": 1.0,
-    "alert_priority_window_sec": 5.0
+    "alert_priority_window_sec": 5.0,
+    "escalation_interval_sec": 10.0,
+    "escalation_reset_sec": 5.0,
+    "alert_queue_max": 10
   },
   "sound_patterns": {
     "AS-01": {

@@ -44,6 +44,12 @@ class Severity(str, Enum):
     INFO = "INFO"
 
 
+# Volumen global por defecto (ADR-011): 80% — HU-DEVICE-004 AC-003.
+# La API expone volume_pct=80 + volume_scale=0.8; el device lo replica aquí
+# para operar sin backend con el mismo nivel.
+DEFAULT_VOLUME_SCALE = 0.8
+
+
 class MediaType(str, Enum):
     IMAGE = "image"
     VIDEO = "video"
@@ -71,7 +77,13 @@ class DeviceConfig:
     buffer_limit_mb: int = 2048
     retention_days: int = 7
     detection_thresholds: dict = field(default_factory=dict)
-    volume_scale: float = 1.0
+    volume_scale: float = DEFAULT_VOLUME_SCALE
+    # HU-DEVICE-004 AC-001: override remoto EV -> AS (catálogo HU-API-004).
+    # Vacío = usa tabla local severity.EVENT_TABLE. Solo códigos AS-XX válidos.
+    event_sound_map: dict = field(default_factory=dict)
+    # HU-DEVICE-004 AC-003 / ADR-011: versión global aplicada (GET /config).
+    # 0 = aún sin pull (solo default local).
+    applied_config_version: int = 0
 
 
 @dataclass

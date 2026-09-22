@@ -37,12 +37,16 @@ from app.common.models import (
 )
 from app.common.config import (
     apply_remote_config,
+    extract_config_version,
     load_cached_remote,
     load_default_config,
     load_env_config,
     load_local_override,
     get_sound_pattern,
+    resolve_alert_code,
 )
+from app.alerting.escalation import EscalationTracker
+from app.alerting.alert_queue import AlertQueue
 from app.device.backend import (
     BackendAuthError,
     BackendClient,
@@ -144,6 +148,11 @@ class DeviceManager:
         self._init_edge_sync()
         self._shutdown = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
+        # HU-DEVICE-004: escalamiento por persistencia + cola FIFO de alertas.
+        # Se configuran con thresholds en initialize()/_reconfigure_services().
+        self._escalation = EscalationTracker()
+        self._alert_queue = AlertQueue()
+        self._last_priority_alert = None
 
     def _init_edge_sync(self) -> None:
         """Crea buffer SQLite + motor sync + monitor conectividad (HU-DEVICE-003).
@@ -191,6 +200,11 @@ class DeviceManager:
                     identity.serial_number, identity.firmware_version)
 
         self.ctx.sound_player = SoundPlayer(self.ctx.config)
+        self._configure_alerting()
+        try:
+            await self._alert_queue.start(self.ctx.sound_player)
+        except RuntimeError:
+            pass  # sin loop en tests legacy: la cola opera en modo pendiente
         await self._timed("cámara", self._init_camera)
         await self._timed("modelo visión", self._init_detector)
         await self._timed("presencia", self._init_presence)
@@ -454,21 +468,30 @@ class DeviceManager:
                            reason)
             return False
         merged, changed = apply_remote_config(self.ctx.config, remote)
+        remote_version = extract_config_version(remote)
+        if remote_version > 0 and merged.applied_config_version < remote_version:
+            merged.applied_config_version = remote_version
+            changed = True
         if changed:
             self.ctx.config = merged
             await self._reconfigure_services()
             self._cache_remote_config(remote)
             logger.info("device_config aplicada (%s): umbrales=%d sound_patterns=%d "
-                        "volumen=%.2f heartbeat=%ss sync=%ss",
+                        "event_sound_map=%d volumen=%.2f (v%d) heartbeat=%ss sync=%ss",
                         reason, len(merged.detection_thresholds),
-                        len(merged.sound_patterns), merged.volume_scale,
+                        len(merged.sound_patterns),
+                        len(getattr(merged, "event_sound_map", {}) or {}),
+                        merged.volume_scale, merged.applied_config_version,
                         merged.heartbeat_interval_sec, merged.sync_interval_sec)
         else:
+            if remote_version > 0:
+                self.ctx.config.applied_config_version = max(
+                    self.ctx.config.applied_config_version, remote_version)
             logger.info("GET config sin cambios aplicables (%s): remote_keys=%s "
-                        "(thresholds/event_sound_map del catálogo se ignoran; "
-                        "solo aplican %s)",
+                        "(aplican detection_thresholds/sound_patterns/"
+                        "event_sound_map/volumen/intervalos, v%d)",
                         reason, sorted(remote.keys()) if isinstance(remote, dict) else type(remote).__name__,
-                        "detection_thresholds/sound_patterns/volumen/intervalos")
+                        self.ctx.config.applied_config_version)
         self.ctx.last_config_pull = time.monotonic()
         return changed
 
@@ -484,7 +507,32 @@ class DeviceManager:
         except OSError as e:
             logger.debug("No se pudo cachear device_config: %s", e)
 
+    def _configure_alerting(self) -> None:
+        """HU-DEVICE-004: sincroniza escalamiento + cola con thresholds/config."""
+        try:
+            th = self.ctx.config.detection_thresholds or {}
+        except AttributeError:
+            th = {}
+        esc = getattr(self, "_escalation", None)
+        if esc is None:
+            esc = EscalationTracker()
+            self._escalation = esc
+        try:
+            esc.configure(th.get("escalation_interval_sec", 10.0),
+                          th.get("escalation_reset_sec", 5.0))
+        except (TypeError, ValueError):
+            pass
+        queue = getattr(self, "_alert_queue", None)
+        if queue is None:
+            queue = AlertQueue()
+            self._alert_queue = queue
+        try:
+            queue.configure(th.get("alert_queue_max", 10))
+        except (TypeError, ValueError):
+            pass
+
     async def _reconfigure_services(self) -> None:
+        self._configure_alerting()
         if self.ctx.detector:
             self.ctx.detector.update_thresholds(self.ctx.config.detection_thresholds)
         if getattr(self.ctx, "pipeline", None):
@@ -697,6 +745,38 @@ class DeviceManager:
         if not events:
             return
 
+        # HU-DEVICE-004 AC-001/AC-002: override de catálogo + escalamiento por
+        # persistencia ANTES del buffer, para que telemetría/alert_log reflejen
+        # lo que realmente sonó (la API hace fallback al default si no coincide).
+        now_m = time.monotonic()
+        for event_data in events:
+            if not isinstance(event_data, dict):
+                continue
+            try:
+                local_code = AlertCode(event_data.get("alert_code", "AS-01"))
+            except ValueError:
+                local_code = AlertCode.AS_01
+            # AC-001: event_sound_map remoto manda; si no, tabla local.
+            mapped_code = resolve_alert_code(
+                self.ctx.config, str(event_data.get("event_type_id", "")), local_code)
+            if mapped_code != local_code:
+                event_data["alert_code"] = mapped_code.value
+            # AC-002: persistencia >10s sube AS-01→02→03→04 (solo esa cadena).
+            esc = getattr(self, "_escalation", None)
+            if esc is not None:
+                try:
+                    new_code, new_sev = esc.escalate(
+                        str(event_data.get("event_type_id", "")),
+                        AlertCode(event_data.get("alert_code", "AS-01")), now_m)
+                except ValueError:
+                    new_code, new_sev = local_code, None
+                if new_code.value != event_data.get("alert_code"):
+                    event_data["alert_code"] = new_code.value
+                    if new_sev:
+                        event_data["severity"] = new_sev
+                    logger.warning("Escalamiento HU-DEVICE-004: %s persistente → %s (%s)",
+                                   event_data.get("event_type_id"), new_code.value, new_sev)
+
         # HU-DEVICE-003: buffer offline SIEMPRE (antes del árbitro de sonido,
         # que puede hacer `return` temprano y saltaría el enqueue).
         try:
@@ -711,6 +791,8 @@ class DeviceManager:
         _RANK = {"CRITICA": 4, "SEVERA": 3, "MODERADA": 2, "LEVE": 1, "INFO": 0}
         best = None  # (rank, alert_code, pattern)
         for event_data in events:
+            if not isinstance(event_data, dict):
+                continue
             try:
                 alert_code = AlertCode(event_data.get("alert_code", "AS-01"))
             except ValueError:
@@ -727,27 +809,51 @@ class DeviceManager:
                     continue
                 best = (rank, alert_code, pattern)
         if best is not None:
-            # Árbitro temporal: SoundPlayer.play() corta al anterior, así que
-            # un evento menor que llega junto a uno mayor lo "cancela".
-            # Dentro de la ventana solo suena un rango igual o mayor; el menor
-            # se loguea pero no suena (la detección queda intacta).
+            # Árbitro temporal: dentro de la ventana solo suena un rango igual
+            # o mayor; el menor se loguea pero no suena (la detección y el
+            # buffer quedan intactos). Lo que pasa el filtro va a la cola
+            # FIFO AC-004 (una a la vez, sin superposición).
             try:
                 window = float((self.ctx.config.detection_thresholds or {}).get(
                     "alert_priority_window_sec", 5.0))
             except (TypeError, ValueError):
                 window = 5.0
-            now_m = time.monotonic()
             last = getattr(self, "_last_priority_alert", None)
             if last is not None and (now_m - last[0]) < window and best[0] < last[1]:
                 logger.debug("Sonido %s suprimido por prioridad (hay rango %d hace %.1fs)",
                              best[1].value, last[1], now_m - last[0])
                 return
             self._last_priority_alert = (now_m, best[0])
+            await self._dispatch_alert_sound(best[2], best[1], best[0])
+
+    async def _dispatch_alert_sound(self, pattern, alert_code, rank: int = 0) -> None:
+        """HU-DEVICE-004 AC-004: encola FIFO; fallback directo sin worker.
+
+        Producción (worker activo): solo encola, el worker reproduce en orden.
+        Tests legacy / sin worker: reproduce directo para no bloquear el loop.
+        En ambos casos nunca se superponen dos tonos (SoundPlayer.play corta).
+        """
+        queue = getattr(self, "_alert_queue", None)
+        if queue is not None:
+            try:
+                queue.enqueue_nowait(pattern, alert_code, rank)
+            except Exception as e:
+                logger.debug("Enqueue alerta fallido, directo: %s", e)
+            worker = getattr(queue, "_worker", None)
+            if worker is not None and not worker.done():
+                return  # el worker la sonará en orden
+            # Sin worker (tests/arranque): drena en orden sin bloquear captura.
             try:
                 loop = asyncio.get_running_loop()
-                loop.create_task(self._play_alert_background(best[2], best[1]))
+                loop.create_task(queue.drain_now(self.ctx.sound_player))
+                return
             except RuntimeError:
                 pass
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._play_alert_background(pattern, alert_code))
+        except RuntimeError:
+            pass
 
     async def _play_alert_background(self, pattern, alert_code) -> None:
         try:
@@ -953,7 +1059,10 @@ class DeviceManager:
                 pass
             try:
                 from pathlib import Path as _P
-                buf.purge_old_evidence_files(_P(data_dir()) / "media", retention_days=7)
+                # retention 0: borra huérfanos de cualquier edad (los FAILED
+                # recién purgados liberan disco ya). Nunca toca JPGs
+                # referenciados por filas vivas (reintento de evidencia).
+                buf.purge_old_evidence_files(_P(data_dir()) / "media", retention_days=0)
             except Exception:
                 pass
         now_m = time.monotonic()
@@ -1031,6 +1140,12 @@ class DeviceManager:
         logger.info("Apagando dispositivo...")
         self.ctx.running = False
         self._shutdown.set()
+        queue = getattr(self, "_alert_queue", None)
+        if queue is not None:
+            try:
+                await queue.stop()
+            except Exception:
+                pass
         for task in self._tasks:
             task.cancel()
         if self._tasks:
