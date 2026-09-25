@@ -24,7 +24,7 @@ if sys.platform == "win32":
 else:
     HAS_WINSOUND = False
 
-from app.common.models import DeviceConfig, SoundPattern, AlertCode
+from app.common.models import DEFAULT_VOLUME_SCALE, DeviceConfig, SoundPattern, AlertCode
 from app.common.config import get_sound_pattern
 
 
@@ -42,9 +42,20 @@ class SoundPlayer:
         self.config = config
 
     def effective_volume(self, pattern: SoundPattern) -> float:
-        """Volumen del patrón × escala global remota (AC-005), acotado [0, 1]."""
-        scale = getattr(self.config, "volume_scale", 1.0) or 1.0
-        return min(1.0, max(0.0, pattern.volume * scale))
+        """Volumen del patrón × escala global remota (HU-DEVICE-004 AC-003).
+
+        Default 80% (ADR-011). En Windows/winsound el Beep del sistema no
+        admite volumen por API: el valor solo aplica al backend
+        simpleaudio/Linux y queda registrado para telemetría/auditoría.
+        """
+        scale = getattr(self.config, "volume_scale", DEFAULT_VOLUME_SCALE)
+        try:
+            scale_f = float(scale)
+        except (TypeError, ValueError):
+            scale_f = DEFAULT_VOLUME_SCALE
+        if not scale_f:
+            scale_f = DEFAULT_VOLUME_SCALE
+        return min(1.0, max(0.0, pattern.volume * scale_f))
 
     async def play(self, pattern: SoundPattern) -> None:
         await self.stop()
