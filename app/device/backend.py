@@ -176,6 +176,30 @@ class BackendClient:
             raise BackendError(f"config respondió {result.status}")
         return result.body
 
+    # -- HU-DEVICE-005: streaming en vivo (poll fase 1; WS fase 2) ------
+    def get_stream_session_sync(self, device_id: str, api_key: str) -> Optional[dict]:
+        """GET /devices/{id}/stream/session (HU-API-012).
+
+        200 = hay viewer (wants-view); 404/409 = sin sesión (IDLE).
+        Nunca lanza por 404/409: retorna None. Auth/5xx sí lanzan.
+        """
+        try:
+            result = _do_request(
+                "GET", self._url(f"/devices/{device_id}/stream/session"),
+                {"X-Device-ID": device_id, "X-API-Key": api_key},
+                None,
+                self.timeout,
+            )
+        except BackendError as e:
+            if "404" in str(e) or "409" in str(e):
+                return None
+            raise
+        if result.status in (404, 409):
+            return None
+        if result.status != 200:
+            raise BackendError(f"stream/session respondió {result.status}")
+        return result.body
+
     # -- HU-DEVICE-003: conectividad + telemetría ----------------------
     def healthcheck_sync(self, timeout_sec: float = 5.0) -> bool:
         """HEAD /actuator/health sin auth (AC-002). True=online, False=offline.
@@ -290,6 +314,10 @@ class BackendClient:
     async def fetch_config(self, *args: Any, **kwargs: Any) -> Optional[dict]:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: self.fetch_config_sync(*args, **kwargs))
+
+    async def get_stream_session(self, *args: Any, **kwargs: Any) -> Optional[dict]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: self.get_stream_session_sync(*args, **kwargs))
 
     async def healthcheck(self, *args: Any, **kwargs: Any) -> bool:
         loop = asyncio.get_running_loop()
