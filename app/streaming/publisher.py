@@ -28,7 +28,7 @@ _logged_no_ws = False
 def load_stream_settings() -> dict[str, Any]:
     enabled_raw = (os.getenv("SOMNGUARD_STREAM_ENABLED", "") or "").strip().lower()
     enabled = enabled_raw in ("1", "true", "yes", "on")
-    poll_sec = float(os.getenv("SOMNGUARD_STREAM_POLL_SEC", "10") or 10)
+    poll_sec = float(os.getenv("SOMNGUARD_STREAM_POLL_SEC", "5") or 5)
     width, height, fps, quality, auto_stop = 640, 480, 8.0, 55, 30.0
     try:
         import json as _json
@@ -48,7 +48,7 @@ def load_stream_settings() -> dict[str, Any]:
         pass
     return {
         "enabled": enabled,
-        "poll_sec": min(60.0, max(3.0, poll_sec)),
+        "poll_sec": min(60.0, max(2.0, poll_sec)),
         "width": width,
         "height": height,
         "fps": max(0.5, min(10.0, fps)),
