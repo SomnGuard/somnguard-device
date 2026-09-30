@@ -117,6 +117,10 @@ class DeviceContext:
     connectivity: Optional[object] = None
     last_retention_monotonic: float = 0.0
     last_storage_alert_monotonic: float = 0.0
+    # HU-DEVICE-005: vivo en el mismo proceso (comparte cámara vía last_frame).
+    stream: Optional[object] = None
+    last_frame: Optional[object] = None
+    last_frame_time: float = 0.0
 
 
 class DeviceManager:
@@ -635,6 +639,7 @@ class DeviceManager:
             asyncio.create_task(self._capture_loop(), name="capture"),
             asyncio.create_task(self._heartbeat_loop(), name="heartbeat"),
             asyncio.create_task(self._sync_loop(), name="sync"),
+            asyncio.create_task(self._stream_loop(), name="stream"),
         ]
         try:
             await self._shutdown.wait()
@@ -663,6 +668,8 @@ class DeviceManager:
                 if state in (DeviceState.ACTIVO, DeviceState.OFFLINE):
                     frame = await self.ctx.camera.read_frame()
                     if frame is not None:
+                        self.ctx.last_frame = frame
+                        self.ctx.last_frame_time = time.monotonic()
                         t_cap = time.monotonic()
                         if self.ctx.pipeline is not None:
                             result = await self.ctx.pipeline.process(frame, capture_time=t_cap)
@@ -675,6 +682,8 @@ class DeviceManager:
                     # antes leía 2 frames y duplicaba costo de inferencia).
                     frame = await self.ctx.camera.read_frame()
                     if frame is not None:
+                        self.ctx.last_frame = frame
+                        self.ctx.last_frame_time = time.monotonic()
                         face_present = await self.ctx.detector.detect_face_only(frame)
                         self.ctx.presence.update(face_present)
                 else:
@@ -972,6 +981,15 @@ class DeviceManager:
             free_disk_pct=free_pct,
             uptime_s=uptime,
         )
+
+    # -- HU-DEVICE-005: vivo integrado (mismo proceso, sin 2º comando) --
+    async def _stream_loop(self) -> None:
+        try:
+            from app.streaming.publisher import run_stream_loop
+        except Exception as e:
+            logger.warning("Streaming no disponible: %s", e)
+            return
+        await run_stream_loop(self.ctx)
 
     # -- HU-DEVICE-003: sync automático + retención + storage ------------
     async def _sync_loop(self) -> None:
