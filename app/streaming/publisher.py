@@ -93,9 +93,11 @@ async def run_stream_loop(ctx: Any) -> None:
         stream.enabled = settings["enabled"]
 
     if not settings["enabled"]:
-        logger.info("Streaming en vivo desactivado (SOMNGUARD_STREAM_ENABLED=true para activar)")
+        logger.info("Streaming video desactivado (SOMNGUARD_STREAM_ENABLED=true para activar)")
+        # La pausa manual se sigue leyendo: el botón debe funcionar sin video.
         while getattr(ctx, "running", False):
-            await asyncio.sleep(30.0)
+            await _poll_detection_paused(ctx)
+            await asyncio.sleep(settings["poll_sec"])
         return
 
     logger.info(
@@ -107,11 +109,35 @@ async def run_stream_loop(ctx: Any) -> None:
     while getattr(ctx, "running", False):
         try:
             await _tick_once(ctx, stream, settings, interval, ws_lib)
+            await _poll_detection_paused(ctx)
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.debug("Stream tick falló: %s", e)
         await asyncio.sleep(settings["poll_sec"])
+
+
+async def _poll_detection_paused(ctx: Any) -> None:
+    """Lee pausa manual (portal) cada poll: prioritaria sobre presencia."""
+    backend = getattr(ctx, "backend", None)
+    identity = getattr(ctx, "identity", None)
+    device_id = getattr(identity, "device_id", None)
+    api_key = getattr(identity, "api_key", None)
+    if backend is None or not device_id or not api_key:
+        return
+    try:
+        paused = await backend.get_detection(str(device_id), str(api_key))
+    except Exception:
+        return
+    if paused is None:
+        return
+    current = bool(getattr(ctx, "manual_detection_paused", False))
+    if bool(paused) != current:
+        ctx.manual_detection_paused = bool(paused)
+        logger.info(
+            "Detección %s por orden del portal (hasta reanudar o reiniciar)",
+            "PAUSADA" if paused else "REANUDADA",
+        )
 
 
 async def _tick_once(ctx: Any, stream: StreamManager, settings: dict[str, Any],
@@ -164,8 +190,9 @@ async def _publish_session(ctx: Any, stream: StreamManager, settings: dict[str, 
             await ws.send(json.dumps({"type": "subscribe", "session_id": session_id}))
             logger.info("Publicando vivo sesión=%s", session_id[:8])
             stop_evt = asyncio.Event()
-            state: dict[str, Any] = {"pc": None}
+            state: dict[str, Any] = {"pc": None, "last_offer_at": 0.0}
             state["pc"] = await _maybe_start_webrtc(ctx, ws, session_id, settings)
+            state["last_offer_at"] = time.monotonic()
             recv_task = asyncio.create_task(_recv_loop(ctx, ws, state, session_id, settings, stop_evt))
             last_validate = time.monotonic()
             try:
@@ -173,6 +200,24 @@ async def _publish_session(ctx: Any, stream: StreamManager, settings: dict[str, 
                     from app.streaming.webrtc import is_connected as _rtc_on
 
                     pc = state.get("pc")
+                    try:
+                        pc_state = getattr(pc, "connectionState", "") if pc is not None else ""
+                    except Exception:
+                        pc_state = ""
+                    if pc is not None and pc_state in ("failed", "closed"):
+                        # Recuperación activa: re-oferta (máx 1 cada 10s).
+                        try:
+                            from app.streaming.webrtc import close_pc as _close2
+
+                            await _close2(pc)
+                        except Exception:
+                            pass
+                        state["pc"] = None
+                        pc = None
+                        if time.monotonic() - float(state.get("last_offer_at", 0.0)) >= 10.0:
+                            state["pc"] = await _maybe_start_webrtc(ctx, ws, session_id, settings)
+                            state["last_offer_at"] = time.monotonic()
+                            pc = state.get("pc")
                     if pc is not None and _rtc_on(pc):
                         # WebRTC conectado: sin MJPEG (ahorra datos).
                         stream.heartbeat_viewer()
@@ -193,9 +238,12 @@ async def _publish_session(ctx: Any, stream: StreamManager, settings: dict[str, 
                         logger.info("Stream auto-stop 30s sin viewer")
                         break
                     # Revalida sesión cada 10s (no cada frame: saturaba la API a 8 req/s).
+                    # Ahí mismo lee la pausa manual: si no, con sesión continua
+                    # el poll de _tick_once nunca corre y la pausa no llega.
                     now = time.monotonic()
                     if now - last_validate >= 10.0:
                         last_validate = now
+                        await _poll_detection_paused(ctx)
                         try:
                             body = await backend.get_stream_session(
                                 str(identity.device_id), str(identity.api_key))

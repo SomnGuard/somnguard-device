@@ -121,6 +121,9 @@ class DeviceContext:
     stream: Optional[object] = None
     last_frame: Optional[object] = None
     last_frame_time: float = 0.0
+    # Pausa manual del portal: prioritaria sobre presencia; solo la limpia
+    # reanudar o reinicio (memoria, sin persistencia).
+    manual_detection_paused: bool = False
 
 
 class DeviceManager:
@@ -661,6 +664,11 @@ class DeviceManager:
             start = time.monotonic()
             try:
                 state = self.ctx.current_state
+                # Pausa manual del portal: congela detección y presencia.
+                # No hay auto-reanudación: solo reanudar o reinicio la limpia.
+                if self.ctx.manual_detection_paused:
+                    await asyncio.sleep(1.0)
+                    continue
                 # SUSPENDIDO/RETIRADO/ERROR sí pausan detección (órdenes administrativas).
                 # OFFLINE ya NO pausa — corrección 2026-09-12 (offline-first):
                 # sin backend el device sigue monitoreando y hace buffer local.
