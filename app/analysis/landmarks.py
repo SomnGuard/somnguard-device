@@ -28,6 +28,9 @@ class LandmarkDetector:
         max_num_faces: int = 1,
         model_path: str = "models/face_landmarker.task",
     ):
+        self.min_detection_confidence = min_detection_confidence
+        self.min_tracking_confidence = min_tracking_confidence
+        self.max_num_faces = max_num_faces
         self.model_path = model_path
         try:
             self._landmarker = mp.tasks.vision.FaceLandmarker.create_from_options(
@@ -62,7 +65,29 @@ class LandmarkDetector:
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         timestamp_ms = int(asyncio.get_running_loop().time() * 1000)
 
-        self._landmarker.detect_async(mp_image, timestamp_ms)
+        # detect_async puede colgar su dispatcher interno (visto en campo:
+        # loop parado con wait eterno). Va a executor con timeout: si falla,
+        # se salta el frame y tras racha se recrea el landmarker.
+        try:
+            loop = asyncio.get_running_loop()
+            await asyncio.wait_for(
+                loop.run_in_executor(None, self._landmarker.detect_async, mp_image, timestamp_ms),
+                timeout=2.0,
+            )
+            self._detect_timeouts = 0
+        except asyncio.TimeoutError:
+            self._detect_timeouts = getattr(self, "_detect_timeouts", 0) + 1
+            logger.warning(
+                "MediaPipe sin respuesta %.1fs (racha %d): salto de frame",
+                2.0, self._detect_timeouts,
+            )
+            if self._detect_timeouts >= 5:
+                self._detect_timeouts = 0
+                await self._recreate_landmarker()
+            return None
+        except Exception as e:
+            logger.debug("detect_async falló: %s", e)
+            return None
 
         # Esperar resultado (polling simple)
         for _ in range(10):
@@ -96,8 +121,57 @@ class LandmarkDetector:
 
     def close(self) -> None:
         if self._initialized:
-            self._landmarker.close()
+            try:
+                self._landmarker.close()
+            except Exception:
+                pass
             self._initialized = False
+
+    async def _recreate_landmarker(self) -> None:
+        """Recupera un dispatcher atascado (cierra con timeout y recrea)."""
+        logger.warning("Recreando FaceLandmarker tras racha de timeouts")
+        old = getattr(self, "_landmarker", None)
+        try:
+            loop = asyncio.get_running_loop()
+            await asyncio.wait_for(
+                loop.run_in_executor(None, self._safe_close, old), timeout=5.0)
+        except Exception as e:
+            logger.debug("Cierre viejo landmarker falló: %s", e)
+        try:
+            import mediapipe as mp
+
+            loop = asyncio.get_running_loop()
+            self._landmarker = await loop.run_in_executor(None, self._create_landmarker)
+            self._latest_result = None
+            self._initialized = True
+            logger.info("FaceLandmarker recreado")
+        except Exception as e:
+            logger.error("No se pudo recrear landmarker: %s", e)
+
+    @staticmethod
+    def _safe_close(landmarker: object) -> None:
+        try:
+            if landmarker is not None and hasattr(landmarker, "close"):
+                landmarker.close()
+        except Exception:
+            pass
+
+    def _create_landmarker(self) -> object:
+        import mediapipe as mp
+
+        return mp.tasks.vision.FaceLandmarker.create_from_options(
+            mp.tasks.vision.FaceLandmarkerOptions(
+                base_options=mp.tasks.BaseOptions(model_asset_path=self.model_path),
+                running_mode=mp.tasks.vision.RunningMode.LIVE_STREAM,
+                num_faces=self.max_num_faces,
+                min_face_detection_confidence=self.min_detection_confidence,
+                min_face_presence_confidence=self.min_tracking_confidence,
+                min_tracking_confidence=self.min_tracking_confidence,
+                output_face_blendshapes=False,
+                output_facial_transformation_matrixes=False,
+                result_callback=self._result_callback,
+            )
+        )
 
 
 def get_key_points(landmarks: np.ndarray) -> dict[str, np.ndarray]:

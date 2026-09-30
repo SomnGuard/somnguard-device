@@ -1,21 +1,41 @@
 """Pista de video aiortc desde el frame compartido (sin abrir la cámara dos veces)."""
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Any, Callable
 
 import numpy as np
 
 
-def make_camera_track(get_frame: Callable[[], Any], width: int = 640, height: int = 480) -> Any:
-    """Crea VideoStreamTrack que lee del frame compartido (o negro si no hay)."""
+def make_camera_track(
+    get_frame: Callable[[], Any], width: int = 640, height: int = 480, fps: float = 10.0
+) -> Any:
+    """Crea VideoStreamTrack que lee del frame compartido (o negro si no hay).
+
+    Ritmo acotado a ``fps``: aiortc pediría ~30fps y el x264 por software
+    se come el CPU que necesita MediaPipe.
+    """
     from aiortc import VideoStreamTrack
+
+    min_interval = 1.0 / max(1.0, fps)
 
     class SharedCameraTrack(VideoStreamTrack):
         kind = "video"
 
+        def __init__(self) -> None:
+            super().__init__()
+            self._next_at = 0.0
+
         async def recv(self):  # type: ignore[no-untyped-def]
             import av
 
+            now = time.monotonic()
+            wait = self._next_at - now
+            if wait > 0:
+                await asyncio.sleep(wait)
+                now = time.monotonic()
+            self._next_at = max(now, self._next_at) + min_interval
             pts, time_base = await self.next_timestamp()
             try:
                 frame = get_frame()
