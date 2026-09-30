@@ -163,39 +163,128 @@ async def _publish_session(ctx: Any, stream: StreamManager, settings: dict[str, 
             await ws.send(json.dumps({"type": "hello", "session_id": session_id}))
             await ws.send(json.dumps({"type": "subscribe", "session_id": session_id}))
             logger.info("Publicando vivo sesión=%s", session_id[:8])
+            stop_evt = asyncio.Event()
+            state: dict[str, Any] = {"pc": None}
+            state["pc"] = await _maybe_start_webrtc(ctx, ws, session_id, settings)
+            recv_task = asyncio.create_task(_recv_loop(ctx, ws, state, session_id, settings, stop_evt))
             last_validate = time.monotonic()
-            while getattr(ctx, "running", False) and stream.is_live:
-                frame = getattr(ctx, "last_frame", None)
-                fresh = time.monotonic() - float(getattr(ctx, "last_frame_time", 0.0) or 0.0) < 2.0
-                if frame is not None and fresh:
-                    jpg = encode_live_frame(frame, settings["width"], settings["height"], settings["quality"])
-                    if jpg is not None:
-                        try:
-                            b64 = base64.b64encode(jpg).decode("ascii")
-                            await ws.send(json.dumps(
-                                {"type": "frame", "session_id": session_id, "data": b64}))
-                        except Exception as e:
-                            logger.info("WS vivo cortado: %s", e)
-                            break
-                if stream.tick():
-                    logger.info("Stream auto-stop 30s sin viewer")
-                    break
-                # Revalida sesión cada 10s (no cada frame: saturaba la API a 8 req/s).
-                now = time.monotonic()
-                if now - last_validate >= 10.0:
-                    last_validate = now
-                    try:
-                        body = await backend.get_stream_session(
-                            str(identity.device_id), str(identity.api_key))
-                        sid = str((body or {}).get("session_id") or (body or {}).get("sessionId") or "")
-                        if not body or (sid and sid != session_id):
-                            stream.stop()
-                            break
+            try:
+                while getattr(ctx, "running", False) and stream.is_live and not stop_evt.is_set():
+                    from app.streaming.webrtc import is_connected as _rtc_on
+
+                    pc = state.get("pc")
+                    if pc is not None and _rtc_on(pc):
+                        # WebRTC conectado: sin MJPEG (ahorra datos).
                         stream.heartbeat_viewer()
-                    except Exception:
-                        pass
-                await asyncio.sleep(interval)
+                    else:
+                        frame = getattr(ctx, "last_frame", None)
+                        fresh = time.monotonic() - float(getattr(ctx, "last_frame_time", 0.0) or 0.0) < 2.0
+                        if frame is not None and fresh:
+                            jpg = encode_live_frame(frame, settings["width"], settings["height"], settings["quality"])
+                            if jpg is not None:
+                                try:
+                                    b64 = base64.b64encode(jpg).decode("ascii")
+                                    await ws.send(json.dumps(
+                                        {"type": "frame", "session_id": session_id, "data": b64}))
+                                except Exception as e:
+                                    logger.info("WS vivo cortado: %s", e)
+                                    break
+                    if stream.tick():
+                        logger.info("Stream auto-stop 30s sin viewer")
+                        break
+                    # Revalida sesión cada 10s (no cada frame: saturaba la API a 8 req/s).
+                    now = time.monotonic()
+                    if now - last_validate >= 10.0:
+                        last_validate = now
+                        try:
+                            body = await backend.get_stream_session(
+                                str(identity.device_id), str(identity.api_key))
+                            sid = str((body or {}).get("session_id") or (body or {}).get("sessionId") or "")
+                            if not body or (sid and sid != session_id):
+                                stream.stop()
+                                break
+                            stream.heartbeat_viewer()
+                        except Exception:
+                            pass
+                    await asyncio.sleep(interval)
+            finally:
+                recv_task.cancel()
+                try:
+                    from app.streaming.webrtc import close_pc as _close
+
+                    if state.get("pc") is not None:
+                        await _close(state["pc"])
+                    state["pc"] = None
+                except Exception:
+                    pass
     except Exception as e:
         logger.info("Publicador vivo terminado: %s", e)
     finally:
         stream.stop()
+
+
+async def _maybe_start_webrtc(ctx: Any, ws: Any, session_id: str, settings: dict[str, Any]) -> Any:
+    """Oferta WebRTC H.264 best-effort; None = sigue MJPEG."""
+    try:
+        from app.streaming.webrtc import create_offer, webrtc_available
+
+        if not webrtc_available():
+            return None
+        pc, sdp = await create_offer(ctx, width=int(settings["width"]), height=int(settings["height"]))
+        await ws.send(json.dumps({"type": "offer", "session_id": session_id, "sdp": sdp}))
+        logger.info("WebRTC offer enviada (H.264)")
+        return pc
+    except Exception as e:
+        logger.info("WebRTC no disponible, sigue MJPEG: %s", e)
+        return None
+
+
+async def _recv_loop(ctx: Any, ws: Any, state: dict[str, Any], session_id: str,
+                   settings: dict[str, Any], stop_evt: Any) -> None:
+    """Answer/ICE/stop/request-offer del viewer."""
+    try:
+        from app.streaming.webrtc import (
+            close_pc,
+            create_offer,
+            handle_answer,
+            handle_remote_ice,
+            is_connected,
+            webrtc_available,
+        )
+    except Exception:
+        return
+    try:
+        async for raw in ws:
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                continue
+            if not isinstance(msg, dict) or msg.get("session_id") != session_id:
+                continue
+            t = msg.get("type")
+            try:
+                pc = state.get("pc")
+                if t == "answer" and pc is not None and msg.get("sdp"):
+                    await handle_answer(pc, str(msg["sdp"]))
+                elif t == "ice" and pc is not None and msg.get("candidate") is not None:
+                    await handle_remote_ice(pc, msg["candidate"])
+                elif t == "request-offer" and webrtc_available():
+                    # El viewer llegó tarde o reintentó: re-oferta (relay sin memoria).
+                    if pc is None or not is_connected(pc):
+                        if pc is not None:
+                            await close_pc(pc)
+                        fresh, sdp = await create_offer(
+                            ctx, width=int(settings["width"]), height=int(settings["height"]))
+                        state["pc"] = fresh
+                        await ws.send(json.dumps(
+                            {"type": "offer", "session_id": session_id, "sdp": sdp}))
+                        logger.info("WebRTC re-offer enviada (H.264)")
+                elif t == "stop":
+                    stop_evt.set()
+                    break
+            except Exception as e:
+                logger.debug("Señal WS ignorada: %s", e)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        pass

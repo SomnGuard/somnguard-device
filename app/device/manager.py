@@ -641,6 +641,14 @@ class DeviceManager:
             asyncio.create_task(self._sync_loop(), name="sync"),
             asyncio.create_task(self._stream_loop(), name="stream"),
         ]
+        watchdog_stop = None
+        try:
+            from app.common.watchdog import start_loop_watchdog
+
+            watchdog_stop = start_loop_watchdog()
+        except Exception as e:
+            logger.debug("Watchdog no disponible: %s", e)
+        self._watchdog_stop = watchdog_stop
         try:
             await self._shutdown.wait()
         except (KeyboardInterrupt, asyncio.CancelledError):
@@ -1158,6 +1166,14 @@ class DeviceManager:
         logger.info("Apagando dispositivo...")
         self.ctx.running = False
         self._shutdown.set()
+        wd = getattr(self, "_watchdog_stop", None)
+        if wd is not None:
+            try:
+                from app.common.watchdog import stop_loop_watchdog
+
+                await stop_loop_watchdog(wd)
+            except Exception:
+                pass
         queue = getattr(self, "_alert_queue", None)
         if queue is not None:
             try:
