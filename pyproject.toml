@@ -36,6 +36,7 @@ full = [
 stream = [
     "websockets>=12",
     "aiortc>=1.9",
+    "livekit>=1.0",
 ]
 
 [build-system]

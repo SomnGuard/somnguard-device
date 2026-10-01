@@ -167,6 +167,24 @@ async def _tick_once(ctx: Any, stream: StreamManager, settings: dict[str, Any],
     session_id = str(body.get("session_id") or body.get("sessionId") or "")
     if not session_id:
         return
+    # Fase 2: si el backend entrega URL+token LiveKit, publica al SFU
+    # (funciona fuera de red local). Si no, relay P2P/MJPEG existente.
+    lk_url = body.get("livekit_url") or body.get("livekitUrl") or ""
+    lk_token = body.get("livekit_token") or body.get("livekitToken") or ""
+    if lk_url and lk_token:
+        try:
+            from app.streaming.livekit_pub import livekit_available, publish_livekit
+
+            if livekit_available():
+                stream.wants_view(session_id)
+                stream.heartbeat_viewer()
+                await publish_livekit(
+                    ctx, session_id, str(lk_url), str(lk_token),
+                    width=int(settings["width"]), height=int(settings["height"]),
+                    fps=float(settings["fps"]))
+                return
+        except Exception as e:
+            logger.debug("LiveKit no disponible, sigue relay: %s", e)
     stream.adapt_bitrate(latency)
     is_active = getattr(ctx, "current_state", None) is DeviceState.ACTIVO
     if not is_active:
