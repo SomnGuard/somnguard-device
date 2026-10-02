@@ -319,6 +319,37 @@ class BackendClient:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: self.get_stream_session_sync(*args, **kwargs))
 
+    def get_detection_sync(self, device_id: str, api_key: str) -> Optional[bool]:
+        """GET /devices/{id}/stream/detection (pausa manual del portal).
+
+        200 {paused}; error de red -> None (conserva último estado).
+        """
+        try:
+            result = _do_request(
+                "GET", self._url(f"/devices/{device_id}/stream/detection"),
+                {"X-Device-ID": device_id, "X-API-Key": api_key},
+                None,
+                self.timeout,
+            )
+        except BackendError:
+            return None
+        if result.status != 200:
+            return None
+        body = result.body
+        for key in ("paused", "detection_paused", "detectionPaused"):
+            if key in body and body[key] is not None:
+                return bool(body[key])
+        data = body.get("data")
+        if isinstance(data, dict):
+            for key in ("paused", "detection_paused", "detectionPaused"):
+                if key in data and data[key] is not None:
+                    return bool(data[key])
+        return None
+
+    async def get_detection(self, *args: Any, **kwargs: Any) -> Optional[bool]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: self.get_detection_sync(*args, **kwargs))
+
     async def healthcheck(self, *args: Any, **kwargs: Any) -> bool:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: self.healthcheck_sync(*args, **kwargs))

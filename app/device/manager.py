@@ -121,6 +121,9 @@ class DeviceContext:
     stream: Optional[object] = None
     last_frame: Optional[object] = None
     last_frame_time: float = 0.0
+    # Pausa manual del portal: prioritaria sobre presencia; solo la limpia
+    # reanudar o reinicio (memoria, sin persistencia).
+    manual_detection_paused: bool = False
 
 
 class DeviceManager:
@@ -641,6 +644,14 @@ class DeviceManager:
             asyncio.create_task(self._sync_loop(), name="sync"),
             asyncio.create_task(self._stream_loop(), name="stream"),
         ]
+        watchdog_stop = None
+        try:
+            from app.common.watchdog import start_loop_watchdog
+
+            watchdog_stop = start_loop_watchdog()
+        except Exception as e:
+            logger.debug("Watchdog no disponible: %s", e)
+        self._watchdog_stop = watchdog_stop
         try:
             await self._shutdown.wait()
         except (KeyboardInterrupt, asyncio.CancelledError):
@@ -653,6 +664,11 @@ class DeviceManager:
             start = time.monotonic()
             try:
                 state = self.ctx.current_state
+                # Pausa manual del portal: congela detección y presencia.
+                # No hay auto-reanudación: solo reanudar o reinicio la limpia.
+                if self.ctx.manual_detection_paused:
+                    await asyncio.sleep(1.0)
+                    continue
                 # SUSPENDIDO/RETIRADO/ERROR sí pausan detección (órdenes administrativas).
                 # OFFLINE ya NO pausa — corrección 2026-09-12 (offline-first):
                 # sin backend el device sigue monitoreando y hace buffer local.
@@ -933,6 +949,13 @@ class DeviceManager:
         return enqueued
 
     async def _heartbeat_loop(self) -> None:
+        # Latido inmediato al arrancar: el backend sale de OFFLINE en segundos,
+        # no en el primer intervalo (el portal espera este cambio).
+        if self.ctx.running and self.ctx.identity.has_credentials():
+            try:
+                await self._heartbeat_once()
+            except Exception as e:
+                logger.debug("Heartbeat inicial falló: %s", e)
         while self.ctx.running:
             interval = self.ctx.config.heartbeat_interval_sec
             await self._sleep_interruptible(max(5, int(interval)))
@@ -1158,6 +1181,14 @@ class DeviceManager:
         logger.info("Apagando dispositivo...")
         self.ctx.running = False
         self._shutdown.set()
+        wd = getattr(self, "_watchdog_stop", None)
+        if wd is not None:
+            try:
+                from app.common.watchdog import stop_loop_watchdog
+
+                await stop_loop_watchdog(wd)
+            except Exception:
+                pass
         queue = getattr(self, "_alert_queue", None)
         if queue is not None:
             try:
@@ -1175,12 +1206,16 @@ class DeviceManager:
             except Exception as e:
                 logger.debug("Error deteniendo cámara: %s", e)
         detector = self.ctx.detector
-        landmarker = getattr(detector, "_landmark_detector", None) if detector else None
+        landmarker = getattr(detector, "_landmarker", None) if detector else None
         if landmarker and hasattr(landmarker, "close"):
-            try:
-                landmarker.close()
-            except Exception as e:
-                logger.debug("Error cerrando landmarker: %s", e)
+            # El close puede colgarse si el dispatcher está atascado: hilo
+            # daemon con timeout, nunca bloquea el apagado.
+            import threading
+
+            t = threading.Thread(
+                target=getattr(landmarker, "close"), name="landmarker-close", daemon=True)
+            t.start()
+            t.join(timeout=3.0)
         logger.info("Dispositivo apagado")
 
 

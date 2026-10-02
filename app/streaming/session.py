@@ -20,6 +20,13 @@ BITRATE_MIN_KBPS = 500
 BITRATE_MAX_KBPS = 2000
 AUTO_STOP_SEC = 30.0
 
+# Niveles QoS AC-002: (kbps, jpeg_q, fps). Forzable con SOMNGUARD_QOS_FORCE=0|1|2.
+QOS_LEVELS = {
+    0: (BITRATE_MAX_KBPS, 55, 8.0),
+    1: (1000, 45, 6.0),
+    2: (BITRATE_MIN_KBPS, 35, 4.0),
+}
+
 
 @dataclass
 class StreamManager:
@@ -32,6 +39,11 @@ class StreamManager:
     state: StreamState = StreamState.IDLE
     session_id: str | None = None
     last_viewer_seen_monotonic: float = field(default_factory=time.monotonic)
+    # QoS aplicada al encoder (AC-002 cableado): la lee el publisher/track.
+    qos_level: int = 0  # 0 buena, 1 media, 2 mala
+    qos_quality: int = 55  # JPEG q
+    qos_fps: float = 8.0
+    qos_logged: int = -1
 
     def wants_view(self, session_id: str) -> bool:
         """El backend avisa que hay viewer (poll GET /session o WS fase 2).
@@ -75,14 +87,32 @@ class StreamManager:
         return self.state is StreamState.LIVE
 
     def adapt_bitrate(self, poll_latency_sec: float) -> int:
-        """Heurística fase 1: red lenta -> baja bitrate, red rápida -> sube.
+        """Heurística por latencia del poll. Aplica nivel QoS al encoder.
 
-        Límites AC-002: min 500kbps, max 2Mbps.
+        AC-002 (500kbps-2Mbps): buena q55@8fps, media q45@6fps, mala q35@4fps.
+        Retorna bitrate estimado; el cambio de nivel lo loguea el llamador.
         """
         if poll_latency_sec >= 1.5:
-            self.bitrate_kbps = BITRATE_MIN_KBPS
+            level = 2
         elif poll_latency_sec >= 0.6:
-            self.bitrate_kbps = 1000
+            level = 1
         else:
-            self.bitrate_kbps = BITRATE_MAX_KBPS
+            level = 0
+        kbps, quality, fps = QOS_LEVELS[level]
+        self.bitrate_kbps = kbps
+        self.qos_level = level
+        self.qos_quality = quality
+        self.qos_fps = fps
         return self.bitrate_kbps
+
+    def force_qos(self, level: int) -> bool:
+        """Fija nivel manual (SOMNGUARD_QOS_FORCE). Retorna si cambió."""
+        if level not in QOS_LEVELS:
+            return False
+        kbps, quality, fps = QOS_LEVELS[level]
+        changed = self.qos_level != level
+        self.bitrate_kbps = kbps
+        self.qos_level = level
+        self.qos_quality = quality
+        self.qos_fps = fps
+        return changed
