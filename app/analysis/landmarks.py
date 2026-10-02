@@ -12,6 +12,21 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+def _neutralize_landmarker_finalizer() -> None:
+    """El __del__ de FaceLandmarker espera a su dispatcher interno, que a
+    veces muere colgado: cualquier GC en el hilo del loop pararía el device
+    (visto en campo dos veces). El ciclo de vida lo lleva esta app
+    (jubilados + cierre daemon al apagar), así que el finalizador se anula."""
+    try:
+        mp.tasks.vision.FaceLandmarker.__del__ = lambda self: None  # type: ignore[method-assign]
+        logger.debug("Finalizador FaceLandmarker neutralizado")
+    except Exception as e:
+        logger.debug("No se pudo neutralizar finalizador: %s", e)
+
+
+_neutralize_landmarker_finalizer()
+
+
 @dataclass
 class FaceLandmarks:
     landmarks: np.ndarray          # (468, 3) normalized x,y,z
@@ -128,15 +143,20 @@ class LandmarkDetector:
             self._initialized = False
 
     async def _recreate_landmarker(self) -> None:
-        """Recupera un dispatcher atascado (cierra con timeout y recrea)."""
+        """Recupera un dispatcher atascado sin bloquear el loop.
+
+        El viejo NO se cierra: su close/__del__ espera al dispatcher colgado
+        eternamente. Se jubila en lista (sin GC) y se crea uno fresco.
+        """
         logger.warning("Recreando FaceLandmarker tras racha de timeouts")
         old = getattr(self, "_landmarker", None)
-        try:
-            loop = asyncio.get_running_loop()
-            await asyncio.wait_for(
-                loop.run_in_executor(None, self._safe_close, old), timeout=5.0)
-        except Exception as e:
-            logger.debug("Cierre viejo landmarker falló: %s", e)
+        retired = getattr(self, "_retired", None)
+        if retired is None:
+            retired = []
+            self._retired = retired
+        if old is not None:
+            retired.append(old)
+            logger.warning("Landmarker viejo jubilado sin cierre (%d jubilados)", len(retired))
         try:
             import mediapipe as mp
 

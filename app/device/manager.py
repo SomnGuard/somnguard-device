@@ -949,6 +949,13 @@ class DeviceManager:
         return enqueued
 
     async def _heartbeat_loop(self) -> None:
+        # Latido inmediato al arrancar: el backend sale de OFFLINE en segundos,
+        # no en el primer intervalo (el portal espera este cambio).
+        if self.ctx.running and self.ctx.identity.has_credentials():
+            try:
+                await self._heartbeat_once()
+            except Exception as e:
+                logger.debug("Heartbeat inicial falló: %s", e)
         while self.ctx.running:
             interval = self.ctx.config.heartbeat_interval_sec
             await self._sleep_interruptible(max(5, int(interval)))
@@ -1199,12 +1206,16 @@ class DeviceManager:
             except Exception as e:
                 logger.debug("Error deteniendo cámara: %s", e)
         detector = self.ctx.detector
-        landmarker = getattr(detector, "_landmark_detector", None) if detector else None
+        landmarker = getattr(detector, "_landmarker", None) if detector else None
         if landmarker and hasattr(landmarker, "close"):
-            try:
-                landmarker.close()
-            except Exception as e:
-                logger.debug("Error cerrando landmarker: %s", e)
+            # El close puede colgarse si el dispatcher está atascado: hilo
+            # daemon con timeout, nunca bloquea el apagado.
+            import threading
+
+            t = threading.Thread(
+                target=getattr(landmarker, "close"), name="landmarker-close", daemon=True)
+            t.start()
+            t.join(timeout=3.0)
         logger.info("Dispositivo apagado")
 
 

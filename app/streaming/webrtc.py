@@ -39,7 +39,15 @@ async def create_offer(ctx: Any, width: int = 640, height: int = 480) -> tuple[A
     from app.streaming.webrtc_track import make_camera_track
 
     pc = RTCPeerConnection()
-    track = make_camera_track(_get_frame_provider(ctx), width=width, height=height)
+    stream = getattr(ctx, "stream", None)
+
+    def _qos_fps() -> float:
+        try:
+            return float(getattr(stream, "qos_fps", 10.0) or 10.0)
+        except Exception:
+            return 10.0
+
+    track = make_camera_track(_get_frame_provider(ctx), width=width, height=height, fps=_qos_fps)
     sender = pc.addTrack(track)
     try:
         caps = RTCRtpSender.getCapabilities("video").codecs

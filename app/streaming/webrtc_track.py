@@ -9,16 +9,24 @@ import numpy as np
 
 
 def make_camera_track(
-    get_frame: Callable[[], Any], width: int = 640, height: int = 480, fps: float = 10.0
+    get_frame: Callable[[], Any],
+    width: int = 640,
+    height: int = 480,
+    fps: float | Callable[[], float] = 10.0,
 ) -> Any:
     """Crea VideoStreamTrack que lee del frame compartido (o negro si no hay).
 
-    Ritmo acotado a ``fps``: aiortc pediría ~30fps y el x264 por software
-    se come el CPU que necesita MediaPipe.
+    Ritmo acotado: aiortc pediría ~30fps y el x264 por software se come el
+    CPU de MediaPipe. ``fps`` acepta callable para QoS dinámica (AC-002).
     """
     from aiortc import VideoStreamTrack
 
-    min_interval = 1.0 / max(1.0, fps)
+    def _fps() -> float:
+        try:
+            v = fps() if callable(fps) else fps
+            return max(1.0, min(15.0, float(v)))
+        except Exception:
+            return 10.0
 
     class SharedCameraTrack(VideoStreamTrack):
         kind = "video"
@@ -30,6 +38,7 @@ def make_camera_track(
         async def recv(self):  # type: ignore[no-untyped-def]
             import av
 
+            min_interval = 1.0 / _fps()
             now = time.monotonic()
             wait = self._next_at - now
             if wait > 0:

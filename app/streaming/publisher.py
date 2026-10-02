@@ -186,6 +186,18 @@ async def _tick_once(ctx: Any, stream: StreamManager, settings: dict[str, Any],
         except Exception as e:
             logger.debug("LiveKit no disponible, sigue relay: %s", e)
     stream.adapt_bitrate(latency)
+    try:
+        forced = int((os.getenv("SOMNGUARD_QOS_FORCE", "") or "").strip())
+        if forced in (0, 1, 2) and stream.force_qos(forced):
+            logger.info("QoS forzada por env: nivel %d", forced)
+    except (TypeError, ValueError):
+        pass
+    if int(getattr(stream, "qos_level", 0)) != int(getattr(stream, "qos_logged", -1)):
+        stream.qos_logged = int(getattr(stream, "qos_level", 0))
+        logger.info(
+            "QoS video nivel %d: %dkbps q%d@%.0ffps",
+            stream.qos_level, stream.bitrate_kbps, stream.qos_quality, stream.qos_fps,
+        )
     is_active = getattr(ctx, "current_state", None) is DeviceState.ACTIVO
     if not is_active:
         if stream.is_live:
@@ -219,6 +231,10 @@ async def _publish_session(ctx: Any, stream: StreamManager, settings: dict[str, 
 
                     pc = state.get("pc")
                     try:
+                        interval = 1.0 / max(0.5, float(getattr(stream, "qos_fps", settings["fps"])))
+                    except Exception:
+                        pass
+                    try:
                         pc_state = getattr(pc, "connectionState", "") if pc is not None else ""
                     except Exception:
                         pc_state = ""
@@ -243,7 +259,9 @@ async def _publish_session(ctx: Any, stream: StreamManager, settings: dict[str, 
                         frame = getattr(ctx, "last_frame", None)
                         fresh = time.monotonic() - float(getattr(ctx, "last_frame_time", 0.0) or 0.0) < 2.0
                         if frame is not None and fresh:
-                            jpg = encode_live_frame(frame, settings["width"], settings["height"], settings["quality"])
+                            jpg = encode_live_frame(
+                                frame, settings["width"], settings["height"],
+                                int(getattr(stream, "qos_quality", settings["quality"])))
                             if jpg is not None:
                                 try:
                                     b64 = base64.b64encode(jpg).decode("ascii")
