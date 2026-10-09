@@ -22,7 +22,7 @@ AUTO_STOP_SEC = 30.0
 
 # Niveles QoS AC-002: (kbps, jpeg_q, fps). Forzable con SOMNGUARD_QOS_FORCE=0|1|2.
 QOS_LEVELS = {
-    0: (BITRATE_MAX_KBPS, 55, 8.0),
+    0: (BITRATE_MAX_KBPS, 55, 12.0),
     1: (1000, 45, 6.0),
     2: (BITRATE_MIN_KBPS, 35, 4.0),
 }
@@ -42,7 +42,7 @@ class StreamManager:
     # QoS aplicada al encoder (AC-002 cableado): la lee el publisher/track.
     qos_level: int = 0  # 0 buena, 1 media, 2 mala
     qos_quality: int = 55  # JPEG q
-    qos_fps: float = 8.0
+    qos_fps: float = 12.0
     qos_logged: int = -1
 
     def wants_view(self, session_id: str) -> bool:

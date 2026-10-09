@@ -7,7 +7,7 @@
   "streaming_enabled": false,
   "stream_width": 640,
   "stream_height": 480,
-  "stream_fps": 8,
+  "stream_fps": 12,
   "stream_poll_sec": 5,
   "stream_auto_stop_sec": 30,
   "buffer_limit_mb": 2048,
