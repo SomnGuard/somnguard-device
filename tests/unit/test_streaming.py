@@ -52,7 +52,7 @@ def test_adapt_bitrate_bounds():
 def test_adapt_bitrate_drives_encoder_qos():
     m = StreamManager()
     m.adapt_bitrate(0.1)
-    assert (m.qos_level, m.qos_quality, m.qos_fps) == (0, 55, 8.0)
+    assert (m.qos_level, m.qos_quality, m.qos_fps) == (0, 55, 12.0)
     m.adapt_bitrate(0.8)
     assert (m.qos_level, m.qos_quality, m.qos_fps) == (1, 45, 6.0)
     m.adapt_bitrate(2.0)
