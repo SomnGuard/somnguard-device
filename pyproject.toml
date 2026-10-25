@@ -33,6 +33,11 @@ full = [
     "pydantic-settings>=2.1",
     "simpleaudio>=1.0",
 ]
+stream = [
+    "websockets>=12",
+    "aiortc>=1.9",
+    "livekit>=1.0",
+]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
