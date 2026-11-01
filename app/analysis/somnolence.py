@@ -21,7 +21,8 @@ from __future__ import annotations
 
 import time
 from collections import deque
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 from app.analysis.ear_mar import (
     PerclosTracker,

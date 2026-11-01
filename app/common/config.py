@@ -1,10 +1,11 @@
 from __future__ import annotations
-import os
+
 import json
+import os
 from pathlib import Path
 from typing import Any
-from .models import DEFAULT_VOLUME_SCALE, DeviceConfig, SoundPattern, AlertCode
 
+from .models import DEFAULT_VOLUME_SCALE, AlertCode, DeviceConfig, SoundPattern
 
 DEFAULT_CONFIG_PATH = Path(__file__).parent.parent.parent / "config" / "device.default.json"
 
@@ -29,7 +30,7 @@ REMOTE_CONFIG_KEYS = frozenset({
 
 
 def load_default_config() -> DeviceConfig:
-    with open(DEFAULT_CONFIG_PATH, "r", encoding="utf-8") as f:
+    with open(DEFAULT_CONFIG_PATH, encoding="utf-8") as f:
         data = json.load(f)
     return _parse_config(data)
 
@@ -479,7 +480,7 @@ def load_local_override(base: DeviceConfig, data_dir: Path | None = None) -> Dev
     if not override_path.exists():
         return base
     try:
-        with open(override_path, "r", encoding="utf-8") as f:
+        with open(override_path, encoding="utf-8") as f:
             override = json.load(f)
         merged, _ = apply_remote_config(base, override)
         return merged
@@ -500,7 +501,7 @@ def load_cached_remote(base: DeviceConfig, data_dir: Path | None = None) -> Devi
     if not cache_path.exists():
         return base
     try:
-        with open(cache_path, "r", encoding="utf-8") as f:
+        with open(cache_path, encoding="utf-8") as f:
             cached = json.load(f)
     except (OSError, ValueError):
         return base

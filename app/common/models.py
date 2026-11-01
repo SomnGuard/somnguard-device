@@ -1,9 +1,9 @@
 from __future__ import annotations
-from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum
-from typing import Optional
+
 import uuid
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from enum import Enum
 
 
 class DeviceState(str, Enum):
@@ -91,8 +91,8 @@ class DeviceIdentity:
     serial_number: str
     firmware_version: str
     api_key_hash: str = ""
-    api_key: Optional[str] = None
-    device_id: Optional[str] = None
+    api_key: str | None = None
+    device_id: str | None = None
     state: DeviceState = DeviceState.REGISTRADO
 
     def has_credentials(self) -> bool:
@@ -111,10 +111,10 @@ class Event:
     category: EventCategory = EventCategory.SISTEMA
     severity: Severity = Severity.INFO
     occurred_at: datetime = field(default_factory=datetime.utcnow)
-    alert_code: Optional[AlertCode] = None
+    alert_code: AlertCode | None = None
     payload: dict = field(default_factory=dict)
     is_offline_sync: bool = True
-    synced_at: Optional[datetime] = None
+    synced_at: datetime | None = None
 
     def to_telemetry_dict(self) -> dict:
         """Payload HU-API-007: solo metadata JSON (sin archivos inline)."""
@@ -157,10 +157,9 @@ def build_telemetry_event(event_data: dict, device_id: str = "",
                           occurred_at_iso: str | None = None,
                           has_evidence: bool = False) -> dict:
     """Normaliza un dict de detector/pipeline al contrato POST /telemetry/events."""
-    from datetime import timezone as _tz
     eid = event_data.get("event_id") or event_id or new_event_id()
     occurred = (event_data.get("occurred_at") or occurred_at_iso
-                or datetime.now(_tz.utc).isoformat())
+                or datetime.now(UTC).isoformat())
     if isinstance(occurred, datetime):
         occurred = occurred.isoformat()
     metadata = dict(event_data.get("metadata") if isinstance(
@@ -237,8 +236,8 @@ class SelfRegisterResult:
 
     device_id: str
     status: str
-    api_key: Optional[str] = None
-    claim_code: Optional[str] = None
+    api_key: str | None = None
+    claim_code: str | None = None
     created: bool = False  # True si 201 (con secretos), False si 200 (reintento)
 
 
@@ -272,5 +271,5 @@ class SyncResult:
     events_failed: int = 0
     duplicate_ids: list = field(default_factory=list)
     config_updated: bool = False
-    new_config: Optional[DeviceConfig] = None
-    error: Optional[str] = None
+    new_config: DeviceConfig | None = None
+    error: str | None = None

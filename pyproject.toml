@@ -50,9 +50,12 @@ include = ["app*"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+fix = false
+
+[tool.ruff.lint]
 select = ["E", "F", "I", "UP", "W"]
-ignore = ["E501"]
-fix = true
+# UP042 recommends StrEnum, whose str() behavior differs from str, Enum.
+ignore = ["E501", "UP042"]
 
 [tool.ruff.format]
 quote-style = "double"

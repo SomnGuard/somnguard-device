@@ -27,7 +27,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
@@ -54,9 +54,9 @@ class VisionPipeline:
         self._last_as09 = -1e9
         # Sub-detectores (import diferido para no romper si falta cv2/mp).
         from app.analysis.detector import Detector
-        from app.analysis.somnolence import SomnolenceDetector
         from app.analysis.distraction import DistractionDetector
         from app.analysis.seatbelt import SeatbeltDetector, assess_fov_for_belt
+        from app.analysis.somnolence import SomnolenceDetector
         self._assess_fov_for_belt = assess_fov_for_belt
         self.obstruction = Detector(self.thresholds)
         self.somnolence = SomnolenceDetector(self.thresholds)

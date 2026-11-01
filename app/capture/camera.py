@@ -1,11 +1,11 @@
 from __future__ import annotations
+
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Optional
+
 import cv2
 import numpy as np
-
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ class CameraConfig:
 class Camera:
     def __init__(self, resolution: tuple[int, int] = (1280, 720), fps: int = 30):
         self.config = CameraConfig(resolution=resolution, fps=fps)
-        self._cap: Optional[cv2.VideoCapture] = None
+        self._cap: cv2.VideoCapture | None = None
         self._running = False
 
     async def start(self) -> None:
@@ -66,7 +66,7 @@ class Camera:
             await asyncio.sleep(0.1)
         raise CameraError("Cámara no entrega frames válidos")
 
-    async def read_frame(self) -> Optional[np.ndarray]:
+    async def read_frame(self) -> np.ndarray | None:
         if not self._cap or not self._running:
             return None
         loop = asyncio.get_running_loop()

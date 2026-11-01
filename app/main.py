@@ -1,10 +1,10 @@
 from __future__ import annotations
+
 import asyncio
 import logging
 import sys
 
 from app.device.manager import main as device_main
-
 
 if __name__ == "__main__":
     logging.basicConfig(

@@ -14,14 +14,14 @@ Solo stdlib (``sqlite3``) para no acoplar el arranque a ``aiosqlite``.
 Wrappers async vía ``run_in_executor`` para no bloquear el loop.
 """
 from __future__ import annotations
+
 import asyncio
 import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Optional
-
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ CREATE INDEX IF NOT EXISTS idx_status_created ON pending_events(status, created_
 
 
 def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class EventBuffer:
@@ -84,7 +84,7 @@ class EventBuffer:
 
     # -- writes (sync, testeables) -----------------------------------
     def enqueue(self, event_id: str, event_json: dict | str,
-                evidence_path: Optional[str] = None) -> bool:
+                evidence_path: str | None = None) -> bool:
         """INSERT OR IGNORE por idempotencia local. Retorna True si insertó.
 
         ``evidence_path`` siempre se normaliza a relativo ``media/<id>.jpg``
@@ -107,7 +107,7 @@ class EventBuffer:
             return False
 
     @staticmethod
-    def normalize_evidence_path(stored: Optional[str]) -> Optional[str]:
+    def normalize_evidence_path(stored: str | None) -> str | None:
         """Convierte absoluto legacy o variantes a ``media/<file>.jpg``."""
         try:
             from app.capture.evidence import to_relative_evidence_path
@@ -231,8 +231,8 @@ class EventBuffer:
     def purge_old_failed(self, retention_days: int = 7) -> int:
         """Retención 7d para fallidos (AC-005). Solo toca FAILED, nunca PENDING."""
         try:
-            cutoff = (datetime.now(timezone.utc).timestamp() - retention_days * 86400)
-            cutoff_iso = datetime.fromtimestamp(cutoff, tz=timezone.utc).isoformat()
+            cutoff = (datetime.now(UTC).timestamp() - retention_days * 86400)
+            cutoff_iso = datetime.fromtimestamp(cutoff, tz=UTC).isoformat()
             with self._connect() as conn:
                 cur = conn.execute(
                     "DELETE FROM pending_events WHERE status='FAILED' AND created_at < ?",
@@ -259,7 +259,7 @@ class EventBuffer:
         try:
             if not media_dir.exists():
                 return 0
-            cutoff = datetime.now(timezone.utc).timestamp() - retention_days * 86400
+            cutoff = datetime.now(UTC).timestamp() - retention_days * 86400
             # 1) huérfanos: archivo sin fila en buffer (match por nombre,
             # válido para relativos nuevos y absolutos legacy).
             with self._connect() as conn:

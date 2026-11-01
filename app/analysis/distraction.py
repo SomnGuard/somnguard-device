@@ -20,7 +20,8 @@ latch por episodio y repetición c/3s para prolongados.
 from __future__ import annotations
 
 import time
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 
@@ -82,9 +83,10 @@ class GazeEstimator:
 
     def update_raw(self, yaw_deg: float, pitch_deg: float = 0.0,
                    now: float | None = None) -> bool:
-        from app.analysis.ear_mar import wrap_deg
         import math
         import time as _time
+
+        from app.analysis.ear_mar import wrap_deg
 
         now = _time.monotonic() if now is None else float(now)
         try:
@@ -219,8 +221,8 @@ class PhoneDetector:
         self.confidence_min = confidence_min
         self.model_path = model_path or "models/phone_detector.tflite"
         self._model = None
-        self._forced: Optional[bool] = None
-        self._load_error: Optional[str] = None
+        self._forced: bool | None = None
+        self._load_error: str | None = None
 
     def inject_present(self, present: bool | None) -> None:
         self._forced = present
@@ -292,7 +294,7 @@ class MovementEstimator:
 
     def __init__(self, diff_threshold: float = 25.0):
         self.diff_threshold = float(diff_threshold)
-        self._prev: Optional[np.ndarray] = None
+        self._prev: np.ndarray | None = None
 
     def update(self, frame: np.ndarray | None) -> bool:
         if frame is None or frame.size == 0:
@@ -333,11 +335,11 @@ class DistractionDetector:
         )
         self.movement_est = MovementEstimator()
         self.update_thresholds(self.thresholds)
-        self._phone_start: Optional[float] = None
-        self._gaze_start: Optional[float] = None
-        self._move_start: Optional[float] = None
-        self._phone_gap_start: Optional[float] = None
-        self._gaze_gap_start: Optional[float] = None
+        self._phone_start: float | None = None
+        self._gaze_start: float | None = None
+        self._move_start: float | None = None
+        self._phone_gap_start: float | None = None
+        self._gaze_gap_start: float | None = None
         self._phone_repeat_count = 0
         self._gaze_repeat_count = 0
         self._fired: set[str] = set()

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from app.common.models import AlertCode, EventCategory, Severity
 
-
 EVENT_TABLE: dict[str, dict] = {
     # Somnolencia — AC-001/AC-002
     "EV-SOM-01": {"name": "Parpadeo anómalo", "category": EventCategory.SOMNOLENCIA,

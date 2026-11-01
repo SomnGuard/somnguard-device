@@ -12,6 +12,7 @@
   (variable de entorno ``SOMNGUARD_PROVISION_TOKEN``).
 """
 from __future__ import annotations
+
 import hashlib
 import json
 import logging
@@ -20,11 +21,9 @@ import platform
 import socket
 import tempfile
 from pathlib import Path
-from typing import Optional
 
-from app.common.models import DeviceIdentity, DeviceState
 from app.common.config import load_dotenv, load_env_config
-
+from app.common.models import DeviceIdentity, DeviceState
 
 logger = logging.getLogger(__name__)
 
@@ -56,10 +55,10 @@ def stable_idempotency_key(serial_number: str) -> str:
     return f"self-register-{digest}"
 
 
-def _read_cpu_serial() -> Optional[str]:
+def _read_cpu_serial() -> str | None:
     for candidate in ("/proc/cpuinfo", "/sys/class/dmi/id/product_uuid"):
         try:
-            with open(candidate, "r", encoding="utf-8", errors="ignore") as f:
+            with open(candidate, encoding="utf-8", errors="ignore") as f:
                 content = f.read()
             if "cpuinfo" in candidate:
                 for line in content.splitlines():
@@ -91,9 +90,9 @@ def get_serial_number() -> str:
     return serial or _stable_machine_fallback()
 
 
-def _read_pyproject_version() -> Optional[str]:
+def _read_pyproject_version() -> str | None:
     try:
-        with open(PROJECT_ROOT / "pyproject.toml", "r", encoding="utf-8") as f:
+        with open(PROJECT_ROOT / "pyproject.toml", encoding="utf-8") as f:
             for line in f:
                 stripped = line.strip()
                 if stripped.startswith("version"):
@@ -177,7 +176,7 @@ def load_or_create_identity() -> DeviceIdentity:
     path = identity_file()
     if path.exists():
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 data = json.load(f)
         except (OSError, ValueError) as e:
             logger.warning("Identidad local ilegible (%s); se recrea sin credenciales", e)
