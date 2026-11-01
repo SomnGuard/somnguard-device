@@ -21,6 +21,7 @@ import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from app.common.config import load_env_config  # noqa: E402
 from app.device.backend import BackendClient  # noqa: E402
 
 
@@ -36,12 +37,18 @@ def load_dotenv_simple() -> None:
 
 
 def api_base() -> str:
-    return (os.environ.get("SOMNGUARD_API_URL") or "http://localhost:8080").rstrip("/")
+    return str(load_env_config()["api_url"])
 
 
 def ws_url() -> str:
     explicit = os.environ.get("SOMNGUARD_WS_URL")
     if explicit:
+        parsed = urllib.parse.urlparse(explicit)
+        environment = os.environ.get("SOMNGUARD_ENV", "production").strip().lower()
+        if parsed.scheme not in {"wss", "ws"} or not parsed.netloc:
+            raise ValueError("SOMNGUARD_WS_URL debe ser una URL WS(S) válida")
+        if parsed.scheme == "ws" and environment != "development":
+            raise ValueError("SOMNGUARD_WS_URL requiere WSS fuera del entorno development")
         return explicit.rstrip("/")
     base = api_base()
     u = urllib.parse.urlparse(base)

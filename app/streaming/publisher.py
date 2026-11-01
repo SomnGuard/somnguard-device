@@ -60,8 +60,19 @@ def load_stream_settings() -> dict[str, Any]:
 def ws_url_for(api_base: str) -> str:
     explicit = (os.getenv("SOMNGUARD_WS_URL", "") or "").strip()
     if explicit:
+        parsed_explicit = urllib.parse.urlparse(explicit)
+        environment = os.getenv("SOMNGUARD_ENV", "production").strip().lower()
+        if parsed_explicit.scheme not in {"wss", "ws"} or not parsed_explicit.netloc:
+            raise ValueError("SOMNGUARD_WS_URL debe ser una URL WS(S) válida")
+        if parsed_explicit.scheme == "ws" and environment != "development":
+            raise ValueError("SOMNGUARD_WS_URL requiere WSS fuera del entorno development")
         return explicit.rstrip("/")
-    u = urllib.parse.urlparse((api_base or "http://localhost:8080").rstrip("/"))
+    u = urllib.parse.urlparse((api_base or "https://api.somnguard.tech").rstrip("/"))
+    environment = os.getenv("SOMNGUARD_ENV", "production").strip().lower()
+    if u.scheme not in {"https", "http"} or not u.netloc:
+        raise ValueError("SOMNGUARD_API_URL debe ser una URL HTTP(S) válida")
+    if u.scheme == "http" and environment != "development":
+        raise ValueError("SOMNGUARD_API_URL requiere HTTPS fuera del entorno development")
     scheme = "wss:" if u.scheme == "https" else "ws:"
     return f"{scheme}//{u.netloc}/ws/stream"
 
