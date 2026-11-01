@@ -1,15 +1,14 @@
 from __future__ import annotations
-import asyncio
+
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
 from app.analysis.ear_mar import estimate_head_pose
 from app.analysis.landmarks import FaceLandmarks, LandmarkDetector, get_key_points
-
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +24,7 @@ class DetectionResult:
     events: list[dict]
     face_present: bool
     fov_ok: bool
-    landmarks: Optional[FaceLandmarks] = None
+    landmarks: FaceLandmarks | None = None
 
 
 class Detector:
@@ -38,17 +37,17 @@ class Detector:
         self._fov_min_face_ratio = self.thresholds.get("fov_min_face_ratio", 0.02)
         self._fov_max_face_ratio = self.thresholds.get("fov_max_face_ratio", 0.85)
         self._obstruction_landmark_threshold = self.thresholds.get("obstruction_landmark_threshold", 0.3)
-        
+
         # Timer de obstrucción para escalamiento
-        self._obstruction_start_time: Optional[float] = None
-        self._last_alert_time: Optional[float] = None
+        self._obstruction_start_time: float | None = None
+        self._last_alert_time: float | None = None
         self._alert_stage = 0  # 0=ninguna, 1=5s, 2=20s
-        
+
         # Estado previo para detectar transiciones
-        self._prev_face_present: Optional[bool] = None
-        self._prev_fov_ok: Optional[bool] = None
-        self._prev_obstructed: Optional[bool] = None
-        
+        self._prev_face_present: bool | None = None
+        self._prev_fov_ok: bool | None = None
+        self._prev_obstructed: bool | None = None
+
         logger.info(f"Detector umbrales: fov_min={self._fov_min_face_ratio}, fov_max={self._fov_max_face_ratio}")
 
     async def load_model(self, model_path: str = "models/face_landmarker.task") -> None:
@@ -118,9 +117,9 @@ class Detector:
                 self._last_alert_time = now
                 self._alert_stage = 0
                 logger.debug("Obstrucción iniciada, timer started")
-            
+
             elapsed = now - self._obstruction_start_time
-            
+
             # Escalamiento: 5s -> primera alerta, 20s -> segunda alerta
             if self._alert_stage == 0 and elapsed >= OBSTRUCTION_ALERT_1_SEC:
                 events.append({

@@ -1,14 +1,12 @@
 from __future__ import annotations
+
 import asyncio
 import logging
-import math
 import sys
-import struct
-from typing import Optional
 
 try:
-    import simpleaudio as sa
     import numpy as np
+    import simpleaudio as sa
     HAS_SIMPLEAUDIO = True
 except ImportError:
     sa = None
@@ -24,9 +22,7 @@ if sys.platform == "win32":
 else:
     HAS_WINSOUND = False
 
-from app.common.models import DEFAULT_VOLUME_SCALE, DeviceConfig, SoundPattern, AlertCode
-from app.common.config import get_sound_pattern
-
+from app.common.models import DEFAULT_VOLUME_SCALE, AlertCode, DeviceConfig, SoundPattern
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +30,7 @@ logger = logging.getLogger(__name__)
 class SoundPlayer:
     def __init__(self, config: DeviceConfig):
         self.config = config
-        self._playing: Optional[object] = None
+        self._playing: object | None = None
         self._sample_rate = 44100
         self._use_winsound = HAS_WINSOUND and not HAS_SIMPLEAUDIO
 
@@ -99,7 +95,7 @@ class SoundPlayer:
         except Exception as e:
             logger.error("Error reproduciendo sonido: %s", e)
 
-    def _build_audio_numpy(self, pattern: SoundPattern) -> "np.ndarray":
+    def _build_audio_numpy(self, pattern: SoundPattern) -> np.ndarray:
         total_duration = self._calc_total_duration(pattern)
         num_samples = int(total_duration * self._sample_rate)
         t = np.linspace(0, total_duration, num_samples, endpoint=False)

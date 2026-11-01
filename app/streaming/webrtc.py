@@ -9,7 +9,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,7 @@ def _get_frame_provider(ctx: Any) -> Callable[[], Any]:
 
 async def create_offer(ctx: Any, width: int = 640, height: int = 480) -> tuple[Any, str]:
     """Crea RTCPeerConnection sendonly H.264 y retorna (pc, sdp_offer)."""
-    from aiortc import RTCPeerConnection, RTCRtpSender, RTCSessionDescription
+    from aiortc import RTCPeerConnection, RTCRtpSender
 
     from app.streaming.webrtc_track import make_camera_track
 

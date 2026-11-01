@@ -16,6 +16,7 @@ restaura ACTIVO/ESPERA al reconectar. SUSPENDIDO/RETIRADO los impone el
 backend vía heartbeat y pausan la detección hasta intervención admin.
 """
 from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -24,29 +25,33 @@ import signal
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
-from app.common.models import (
-    BACKEND_STATUS_TO_LOCAL,
-    DeviceConfig,
-    DeviceIdentity,
-    DeviceState,
-    AlertCode,
-    HeartbeatPayload,
-)
+from app.alerting.alert_queue import AlertQueue
+from app.alerting.escalation import EscalationTracker
+from app.alerting.sound_player import SoundPlayer
+from app.analysis.detector import Detector
+from app.capture.camera import Camera, CameraError
 from app.common.config import (
     apply_remote_config,
     extract_config_version,
+    get_sound_pattern,
     load_cached_remote,
     load_default_config,
     load_env_config,
     load_local_override,
-    get_sound_pattern,
     resolve_alert_code,
 )
-from app.alerting.escalation import EscalationTracker
-from app.alerting.alert_queue import AlertQueue
+from app.common.models import (
+    BACKEND_STATUS_TO_LOCAL,
+    AlertCode,
+    DeviceConfig,
+    DeviceIdentity,
+    DeviceState,
+    HeartbeatPayload,
+    build_telemetry_event,
+    new_event_id,
+)
 from app.device.backend import (
     BackendAuthError,
     BackendClient,
@@ -62,11 +67,7 @@ from app.device.identity import (
     update_device_id,
     update_state,
 )
-from app.capture.camera import Camera, CameraError
-from app.analysis.detector import Detector, DetectionResult
 from app.monitoring.presence import PresenceMonitor
-from app.alerting.sound_player import SoundPlayer
-from app.common.models import build_telemetry_event, new_event_id
 
 try:
     from app.analysis.pipeline import VisionPipeline
@@ -96,12 +97,12 @@ class DeviceContext:
     identity: DeviceIdentity
     config: DeviceConfig
     env_config: dict
-    camera: Optional[Camera] = None
-    detector: Optional[Detector] = None
-    pipeline: Optional[object] = None  # VisionPipeline HU-DEVICE-001 (None si no disponible)
-    presence: Optional[PresenceMonitor] = None
-    sound_player: Optional[SoundPlayer] = None
-    backend: Optional[BackendClient] = None
+    camera: Camera | None = None
+    detector: Detector | None = None
+    pipeline: object | None = None  # VisionPipeline HU-DEVICE-001 (None si no disponible)
+    presence: PresenceMonitor | None = None
+    sound_player: SoundPlayer | None = None
+    backend: BackendClient | None = None
     running: bool = False
     current_state: DeviceState = DeviceState.REGISTRADO
     backend_available: bool = False
@@ -112,14 +113,14 @@ class DeviceContext:
     last_detector_retry: float = 0.0
     last_config_pull: float = 0.0
     # HU-DEVICE-003: buffer/sync (se crean en __init__; None en tests legacy).
-    buffer: Optional[object] = None
-    sync_engine: Optional[object] = None
-    connectivity: Optional[object] = None
+    buffer: object | None = None
+    sync_engine: object | None = None
+    connectivity: object | None = None
     last_retention_monotonic: float = 0.0
     last_storage_alert_monotonic: float = 0.0
     # HU-DEVICE-005: vivo en el mismo proceso (comparte cámara vía last_frame).
-    stream: Optional[object] = None
-    last_frame: Optional[object] = None
+    stream: object | None = None
+    last_frame: object | None = None
     last_frame_time: float = 0.0
     # Pausa manual del portal: prioritaria sobre presencia; solo la limpia
     # reanudar o reinicio (memoria, sin persistencia).
@@ -508,7 +509,7 @@ class DeviceManager:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             with open(cache_path, "w", encoding="utf-8") as f:
                 json.dump({
-                    "pulled_at": datetime.now(timezone.utc).isoformat(),
+                    "pulled_at": datetime.now(UTC).isoformat(),
                     "config": remote,
                 }, f, indent=2)
         except OSError as e:
@@ -611,7 +612,7 @@ class DeviceManager:
                     self.ctx.pre_offline_state.value if hasattr(self.ctx.pre_offline_state, 'value') else self.ctx.pre_offline_state)
         await self._transition_to(target)
 
-    def _apply_backend_status(self, status: Optional[str]) -> None:
+    def _apply_backend_status(self, status: str | None) -> None:
         """Mapea el estado reportado por el backend al estado local (AC-004)."""
         if not status:
             return

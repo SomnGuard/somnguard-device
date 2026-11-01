@@ -46,8 +46,8 @@ async def main() -> None:
     th = dict(cfg.detection_thresholds or {})
 
     from app.analysis.distraction import DistractionDetector  # noqa (calibración gaze)
-    from app.analysis.ear_mar import estimate_head_pose, eye_aspect_ratio
-    from app.analysis.landmarks import LandmarkDetector, get_key_points
+    from app.analysis.ear_mar import estimate_head_pose
+    from app.analysis.landmarks import LandmarkDetector
     from app.analysis.somnolence import SomnolenceDetector
 
     som = SomnolenceDetector(th)
