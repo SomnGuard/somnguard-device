@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -85,8 +86,15 @@ def load_env_config() -> dict[str, Any]:
     existe; las variables del sistema tienen prioridad sobre el archivo.
     """
     load_dotenv()
-    api_url = os.getenv("SOMNGUARD_API_URL", "http://localhost:8000").strip().rstrip("/")
+    environment = os.getenv("SOMNGUARD_ENV", "production").strip().lower()
+    api_url = os.getenv("SOMNGUARD_API_URL", "https://api.somnguard.tech").strip().rstrip("/")
+    parsed_url = urllib.parse.urlparse(api_url)
+    if parsed_url.scheme not in {"https", "http"} or not parsed_url.netloc:
+        raise ValueError("SOMNGUARD_API_URL debe ser una URL HTTP(S) válida")
+    if parsed_url.scheme == "http" and environment != "development":
+        raise ValueError("SOMNGUARD_API_URL requiere HTTPS fuera del entorno development")
     return {
+        "environment": environment,
         "api_url": api_url,
         "api_key": os.getenv("SOMNGUARD_API_KEY", ""),
         "device_id": os.getenv("SOMNGUARD_DEVICE_ID", ""),
@@ -101,7 +109,7 @@ def load_env_config() -> dict[str, Any]:
 
 def api_base_url(env_config: dict[str, Any] | None = None) -> str:
     env = env_config or load_env_config()
-    return str(env.get("api_url", "http://localhost:8000")).rstrip("/")
+    return str(env.get("api_url", "https://api.somnguard.tech")).rstrip("/")
 
 
 def redact_secrets(data: dict[str, Any]) -> dict[str, Any]:

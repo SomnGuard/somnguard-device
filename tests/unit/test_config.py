@@ -84,11 +84,12 @@ def test_merge_does_not_mutate_base():
 
 
 def _clear_somnguard_env(monkeypatch):
-    for var in ("SOMNGUARD_API_URL", "SOMNGUARD_API_KEY", "SOMNGUARD_DEVICE_ID",
+    for var in ("SOMNGUARD_ENV", "SOMNGUARD_API_URL", "SOMNGUARD_API_KEY", "SOMNGUARD_DEVICE_ID",
                 "SOMNGUARD_PROVISION_TOKEN", "SOMNGUARD_SERIAL_NUMBER",
                 "SOMNGUARD_FIRMWARE_VERSION", "SOMNGUARD_DATA_DIR",
                 "SOMNGUARD_LOG_LEVEL", "SOMNGUARD_BACKEND_TIMEOUT_SEC"):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("SOMNGUARD_ENV", "development")
 
 
 def test_dotenv_file_is_loaded(monkeypatch, tmp_path):

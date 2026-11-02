@@ -148,7 +148,7 @@ class DeviceManager:
             config=config,
             env_config=env_config,
             backend=BackendClient(
-                env_config.get("api_url", "http://localhost:8000"),
+                env_config.get("api_url", "https://api.somnguard.tech"),
                 timeout_sec=float(env_config.get("backend_timeout_sec", 10.0)),
             ),
             boot_start_monotonic=time.monotonic(),

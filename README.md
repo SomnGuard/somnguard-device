@@ -67,7 +67,8 @@ Parar: `Ctrl+C`.
 
 En `.env` pon:
 ```
-SOMNGUARD_API_URL=http://localhost:8080   # sin /api/v1
+SOMNGUARD_ENV=development
+SOMNGUARD_API_URL=http://localhost:8080   # sin /api/v1; HTTP solo en development
 SOMNGUARD_PROVISION_TOKEN=<token de POST /devices/provisioning-tokens>
 ```
 
@@ -79,6 +80,8 @@ py -m app.main
 **Qué pasa:** usa `serial`+`firmware` del archivo ya creado + `X-Provision-Token` → `POST /api/v1/devices/self-register` (`201` trae `device_id+api_key` **una sola vez**). Guarda `device_id+api_key` en `data/device_identity.json` (`chmod 600`) y **deja de usar el token**. Log: `Auto-registro completado: device_id=<uuid>`. Luego `heartbeat` cada `30s`.
 
 Reinicia: `Dispositivo ya registrado: <uuid>` y **no** vuelve a hacer `self-register` (`200` no reexpone key, ADR-010). Si cambia el token en `.env` ya no lo usa (tiene credencial).
+
+Fuera de `SOMNGUARD_ENV=development`, el dispositivo rechaza cualquier `SOMNGUARD_API_URL` con esquema `http://`; debe usarse HTTPS. Si se define `SOMNGUARD_WS_URL`, producción también exige `wss://`.
 
 ¿Token nuevo? Borra `data/device_identity.json` y repite paso 1.
 
