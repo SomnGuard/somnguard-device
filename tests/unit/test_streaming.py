@@ -24,12 +24,13 @@ def test_disabled_never_goes_live():
     assert not m.is_live
 
 
-def test_auto_stop_after_timeout():
+def test_auto_stop_after_timeout(monkeypatch):
+    monkeypatch.setattr("app.streaming.session.time.monotonic", lambda: 100.0)
     m = StreamManager(auto_stop_sec=30.0)
     m.wants_view("sess-1")
-    assert m.tick(m.last_viewer_seen_monotonic + 29.9) is False
+    assert m.tick(129.999) is False
     assert m.is_live
-    assert m.tick(m.last_viewer_seen_monotonic + 30.0) is True
+    assert m.tick(130.0) is True
     assert not m.is_live
     assert m.session_id is None
 

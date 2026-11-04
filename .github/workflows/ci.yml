@@ -28,5 +28,13 @@ jobs:
       - name: Run Ruff
         run: ruff check --no-fix .
 
+      - name: Validate deployment scripts
+        run: |
+          for script in scripts/*.sh; do
+            test -s "$script"
+            bash -n "$script"
+          done
+          test -s deploy/somnguard-device.service
+
       - name: Run pytest
         run: pytest tests/ -v

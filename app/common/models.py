@@ -113,7 +113,7 @@ class Event:
     occurred_at: datetime = field(default_factory=datetime.utcnow)
     alert_code: AlertCode | None = None
     payload: dict = field(default_factory=dict)
-    is_offline_sync: bool = True
+    is_offline_sync: bool = False
     synced_at: datetime | None = None
 
     def to_telemetry_dict(self) -> dict:
@@ -155,7 +155,8 @@ def new_event_id() -> str:
 def build_telemetry_event(event_data: dict, device_id: str = "",
                           event_id: str | None = None,
                           occurred_at_iso: str | None = None,
-                          has_evidence: bool = False) -> dict:
+                          has_evidence: bool = False,
+                          is_offline_sync: bool = False) -> dict:
     """Normaliza un dict de detector/pipeline al contrato POST /telemetry/events."""
     eid = event_data.get("event_id") or event_id or new_event_id()
     occurred = (event_data.get("occurred_at") or occurred_at_iso
@@ -181,7 +182,7 @@ def build_telemetry_event(event_data: dict, device_id: str = "",
         "severity": str(event_data.get("severity", "INFO")),
         "sound_pattern": str(event_data.get("alert_code", "")) or None,
         "metadata": metadata,
-        "is_offline_sync": True,
+        "is_offline_sync": bool(is_offline_sync),
         "has_evidence": bool(has_evidence),
     }
 
