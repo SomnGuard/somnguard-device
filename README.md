@@ -52,6 +52,41 @@ Verificar sin hardware:
 py -m pytest tests/ -v  # 87 passed
 ```
 
+## Instalación como servicio (Debian / Raspberry Pi OS de 64 bits)
+
+La instalación de producción usa `/opt/somnguard-device` para el código,
+`/var/lib/somnguard` para identidad, cola y evidencias, y
+`/etc/somnguard/device.env` para la configuración del servicio. El token de
+provisionamiento se agrega allí solo antes del primer registro.
+
+En un equipo limpio con acceso a `apt`, PyPI y Google Cloud Storage:
+
+```bash
+sudo git clone https://github.com/SomnGuard/somnguard-device.git /opt/somnguard-device
+cd /opt/somnguard-device
+sudo scripts/provision.sh
+sudoedit /etc/somnguard/device.env  # agrega SOMNGUARD_PROVISION_TOKEN si aún no está registrado
+sudo scripts/install_service.sh
+sudo systemctl status somnguard-device.service
+```
+
+`provision.sh` instala librerías del sistema, crea el usuario sin login y prepara
+el directorio de estado y el archivo de entorno con permisos restringidos.
+`install_service.sh` crea el virtualenv, instala dependencias y modelos, valida e
+instala la unidad systemd y deja el servicio iniciado. Para actualizar una
+instalación, configura el upstream de la rama desplegada y ejecuta
+`sudo /opt/somnguard-device/scripts/update.sh`; el script requiere un árbol Git
+limpio, hace fast-forward, reinstala dependencias y revierte el commit si la
+actualización falla. `factory_reset.sh --confirm` elimina identidad, cola,
+caché de configuración y evidencias locales; preserva el código y el archivo
+de entorno.
+
+El servicio corre como `somnguard`, con permisos de cámara/GPIO según los grupos
+disponibles y datos escribibles solo bajo `/var/lib/somnguard`. Verifica una
+instalación en una imagen limpia de Raspberry Pi OS antes de desplegar a flota;
+el CI valida sintaxis y estructura de scripts, pero no sustituye la prueba de
+hardware/cámara/systemd en el dispositivo.
+
 ### 1) Modo local — sin backend ni token (prueba cámara y estados)
 
 ```powershell

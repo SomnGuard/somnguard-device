@@ -49,8 +49,6 @@ from app.common.models import (
     DeviceIdentity,
     DeviceState,
     HeartbeatPayload,
-    build_telemetry_event,
-    new_event_id,
 )
 from app.device.backend import (
     BackendAuthError,
@@ -58,6 +56,7 @@ from app.device.backend import (
     BackendConflictError,
     BackendError,
 )
+from app.device.event_queue import enqueue_events
 from app.device.identity import (
     data_dir,
     load_or_create_identity,
@@ -141,8 +140,8 @@ class DeviceManager:
             cache_path = data_dir() / "device_config.cache.json"
             if cache_path.exists():
                 logger.info("Configuración restaurada desde caché: %s", cache_path)
-        except OSError:
-            pass
+        except OSError as error:
+            logger.debug("No se pudo comprobar la caché de configuración: %s", error)
         self.ctx = DeviceContext(
             identity=identity,
             config=config,
@@ -197,8 +196,8 @@ class DeviceManager:
             eng = getattr(self.ctx, "sync_engine", None)
             if eng is not None and hasattr(eng, "_register_success"):
                 eng._register_success()
-        except Exception:
-            pass
+        except Exception as error:
+            logger.debug("No se pudo reiniciar el backoff de sincronización: %s", error)
 
     # -- arranque ------------------------------------------------------
     async def initialize(self) -> None:
@@ -211,8 +210,8 @@ class DeviceManager:
         self._configure_alerting()
         try:
             await self._alert_queue.start(self.ctx.sound_player)
-        except RuntimeError:
-            pass  # sin loop en tests legacy: la cola opera en modo pendiente
+        except RuntimeError as error:
+            logger.debug("La cola de alertas iniciará al disponer de un event loop: %s", error)
         await self._timed("cámara", self._init_camera)
         await self._timed("modelo visión", self._init_detector)
         await self._timed("presencia", self._init_presence)
@@ -252,8 +251,8 @@ class DeviceManager:
             self.ctx.current_state = DeviceState.ERROR
             try:
                 save_identity(update_state(self.ctx.identity, DeviceState.ERROR))
-            except OSError:
-                pass
+            except OSError as error:
+                logger.error("No se pudo persistir el estado de error de la cámara: %s", error)
             raise
 
     async def _play_startup_alert(self) -> None:
@@ -528,16 +527,16 @@ class DeviceManager:
         try:
             esc.configure(th.get("escalation_interval_sec", 10.0),
                           th.get("escalation_reset_sec", 5.0))
-        except (TypeError, ValueError):
-            pass
+        except (TypeError, ValueError) as error:
+            logger.warning("Umbrales de escalamiento inválidos; se conservan los valores previos: %s", error)
         queue = getattr(self, "_alert_queue", None)
         if queue is None:
             queue = AlertQueue()
             self._alert_queue = queue
         try:
             queue.configure(th.get("alert_queue_max", 10))
-        except (TypeError, ValueError):
-            pass
+        except (TypeError, ValueError) as error:
+            logger.warning("Tamaño de cola de alertas inválido; se conserva el tamaño previo: %s", error)
 
     async def _reconfigure_services(self) -> None:
         self._configure_alerting()
@@ -546,8 +545,8 @@ class DeviceManager:
         if getattr(self.ctx, "pipeline", None):
             try:
                 self.ctx.pipeline.update_thresholds(self.ctx.config.detection_thresholds)
-            except Exception:
-                pass
+            except Exception as error:
+                logger.warning("No se pudieron actualizar los umbrales del pipeline: %s", error)
         if self.ctx.sound_player:
             self.ctx.sound_player.update_config(self.ctx.config)
         if self.ctx.camera and self.ctx.config.camera_resolution:
@@ -556,8 +555,8 @@ class DeviceManager:
         if timeout and self.ctx.presence:
             try:
                 self.ctx.presence.timeout_sec = float(timeout)
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as error:
+                logger.warning("Tiempo de ausencia facial inválido; no se actualizó: %s", error)
 
     # -- transiciones ------------------------------------------------------
     async def _transition_to(self, new_state: DeviceState) -> None:
@@ -626,8 +625,8 @@ class DeviceManager:
                 self.ctx.current_state = local
                 try:
                     self.ctx.identity = update_state(self.ctx.identity, local)
-                except OSError:
-                    pass
+                except OSError as error:
+                    logger.error("No se pudo persistir el estado impuesto por backend: %s", error)
 
     # -- loops ---------------------------------------------------------------
     async def run(self) -> None:
@@ -757,8 +756,8 @@ class DeviceManager:
         if hasattr(result, "events"):
             try:
                 self.ctx.presence.update(bool(result.face_present and result.fov_ok))
-            except Exception:
-                pass
+            except Exception as error:
+                logger.debug("No se pudo actualizar el monitor de presencia: %s", error)
             events = list(result.events or [])
             metrics = getattr(result, "metrics", None)
             if isinstance(metrics, dict) and metrics.get("within_budget") is False:
@@ -873,13 +872,14 @@ class DeviceManager:
                 loop = asyncio.get_running_loop()
                 loop.create_task(queue.drain_now(self.ctx.sound_player))
                 return
-            except RuntimeError:
-                pass
+            except RuntimeError as error:
+                logger.debug("No se pudo programar el vaciado de alertas sin event loop: %s", error)
+                return
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(self._play_alert_background(pattern, alert_code))
-        except RuntimeError:
-            pass
+        except RuntimeError as error:
+            logger.debug("No se pudo programar la alerta sin event loop activo: %s", error)
 
     async def _play_alert_background(self, pattern, alert_code) -> None:
         try:
@@ -897,57 +897,19 @@ class DeviceManager:
         - INSERT en ``pending_events`` (WAL, sobrevive reinicio).
         Retorna nº encolados. Sin buffer (tests legacy) = 0 sin error.
         """
-        buf = getattr(self.ctx, "buffer", None)
-        if buf is None:
-            return 0
         try:
-            from app.capture.evidence import save_event_frame
-        except Exception:
-            save_event_frame = None  # type: ignore
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-        device_id = getattr(self.ctx.identity, "device_id", "") or ""
-        try:
-            ddir = data_dir()
-        except Exception:
-            ddir = None
-        enqueued = 0
-        for ev in events:
-            if not isinstance(ev, dict):
-                continue
-            try:
-                eid = str(ev.get("event_id") or new_event_id())
-                ev.setdefault("event_id", eid)
-                severity = str(ev.get("severity", "INFO"))
-                evidence_path = None
-                if save_event_frame is not None and ddir is not None:
-                    try:
-                        if loop is not None:
-                            # cv2.imwrite bloquea ~10-30ms: va a executor.
-                            evidence_path = await loop.run_in_executor(
-                                None, lambda e=eid, s=severity, f=frame:
-                                save_event_frame(f, e, s, ddir))
-                        else:
-                            evidence_path = save_event_frame(frame, eid, severity, ddir)
-                    except Exception:
-                        evidence_path = None
-                telemetry = build_telemetry_event(
-                    ev, device_id=device_id, event_id=eid,
-                    has_evidence=bool(evidence_path))
-                # has_evidence real para fase 2 (el detector no lo sabe).
-                if evidence_path:
-                    telemetry["has_evidence"] = True
-                ok = buf.enqueue(eid, telemetry, evidence_path)
-                if ok:
-                    enqueued += 1
-            except Exception as e:
-                logger.debug("Enqueue evento fallido: %s", e)
-                continue
-        if enqueued:
-            logger.debug("Buffer: %d evento(s) encolados", enqueued)
-        return enqueued
+            directory = data_dir()
+        except OSError as error:
+            logger.warning("Data directory is unavailable; evidence will be skipped: %s", error)
+            directory = None
+        return await enqueue_events(
+            getattr(self.ctx, "buffer", None),
+            self.ctx.identity,
+            events,
+            frame,
+            data_directory=directory,
+            is_offline_sync=not self.ctx.backend_available,
+        )
 
     async def _heartbeat_loop(self) -> None:
         # Latido inmediato al arrancar: el backend sale de OFFLINE en segundos,
@@ -1055,12 +1017,13 @@ class DeviceManager:
                     if online and getattr(conn, "_was_offline", False):
                         self._on_reconnected()
                     conn._was_offline = not online
-            except Exception:
-                pass
+            except Exception as error:
+                logger.warning("No se pudo actualizar el monitor de conectividad: %s", error)
             if not online:
                 if getattr(self.ctx, "backend_available", True):
                     await self._enter_offline("healthcheck sin respuesta")
                 continue
+            self.ctx.backend_available = True
             await self._do_sync_batch()
 
     async def _do_sync_batch(self) -> dict:
@@ -1097,16 +1060,16 @@ class DeviceManager:
         if buf is not None:
             try:
                 buf.purge_old_failed(retention_days=0)  # FAILED más antiguos primero
-            except Exception:
-                pass
+            except Exception as error:
+                logger.warning("No se pudo purgar eventos fallidos antiguos: %s", error)
             try:
                 from pathlib import Path as _P
                 # retention 0: borra huérfanos de cualquier edad (los FAILED
                 # recién purgados liberan disco ya). Nunca toca JPGs
                 # referenciados por filas vivas (reintento de evidencia).
                 buf.purge_old_evidence_files(_P(data_dir()) / "media", retention_days=0)
-            except Exception:
-                pass
+            except Exception as error:
+                logger.warning("No se pudieron purgar evidencias huérfanas: %s", error)
         now_m = time.monotonic()
         last = float(getattr(self.ctx, "last_storage_alert_monotonic", 0.0) or 0.0)
         if (now_m - last) < STORAGE_ALERT_COOLDOWN_SEC:
@@ -1116,8 +1079,8 @@ class DeviceManager:
                        used_pct)
         try:
             await self._play_error_alert()
-        except Exception:
-            pass
+        except Exception as error:
+            logger.warning("No se pudo encolar alerta de almacenamiento crítico: %s", error)
 
     async def _run_retention_if_due(self) -> None:
         """AC-005/AC-006: purga diaria FAILED 7d + JPGs huérfanos/antiguos."""
@@ -1137,15 +1100,15 @@ class DeviceManager:
             n = buf.purge_old_failed(retention_days=retention)
             if n:
                 logger.info("Retención: %d FAILED >%dd purgados", n, retention)
-        except Exception:
-            pass
+        except Exception as error:
+            logger.warning("No se pudieron purgar eventos fallidos por retención: %s", error)
         try:
             from pathlib import Path as _P
             m = buf.purge_old_evidence_files(_P(data_dir()) / "media", retention_days=retention)
             if m:
                 logger.info("Retención: %d JPGs purgados", m)
-        except Exception:
-            pass
+        except Exception as error:
+            logger.warning("No se pudieron purgar evidencias por retención: %s", error)
 
     async def _heartbeat_once(self) -> None:
         payload = self._heartbeat_payload().to_request_dict()
@@ -1188,14 +1151,14 @@ class DeviceManager:
                 from app.common.watchdog import stop_loop_watchdog
 
                 await stop_loop_watchdog(wd)
-            except Exception:
-                pass
+            except Exception as error:
+                logger.warning("No se pudo detener el watchdog durante el apagado: %s", error)
         queue = getattr(self, "_alert_queue", None)
         if queue is not None:
             try:
                 await queue.stop()
-            except Exception:
-                pass
+            except Exception as error:
+                logger.warning("No se pudo detener la cola de alertas: %s", error)
         for task in self._tasks:
             task.cancel()
         if self._tasks:
