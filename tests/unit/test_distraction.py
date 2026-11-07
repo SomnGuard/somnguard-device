@@ -1,4 +1,6 @@
 """HU-DEVICE-001 IT3: distracción AC-003. Sin hardware."""
+import numpy as np
+
 from app.analysis.distraction import (
     DistractionDetector,
     GazeEstimator,
@@ -6,7 +8,6 @@ from app.analysis.distraction import (
     PhoneDetector,
     is_gaze_off_axis,
 )
-import numpy as np
 
 
 def test_gaze_threshold():

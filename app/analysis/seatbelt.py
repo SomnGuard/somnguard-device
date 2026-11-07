@@ -20,7 +20,8 @@ frame o está centrado arriba sin torso visible, marca no-evaluable.
 from __future__ import annotations
 
 import time
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 
@@ -38,12 +39,12 @@ class SeatbeltVisionAdapter:
         self.confidence_min = confidence_min
         self.model_path = model_path
         self._model = None
-        self._forced: Optional[tuple[Optional[bool], Optional[bool]]] = None
+        self._forced: tuple[bool | None, bool | None] | None = None
 
-    def inject(self, visible: Optional[bool], correct: Optional[bool] = None) -> None:
+    def inject(self, visible: bool | None, correct: bool | None = None) -> None:
         self._forced = (visible, correct)
 
-    def detect(self, frame: np.ndarray | None) -> tuple[Optional[bool], Optional[bool], float]:
+    def detect(self, frame: np.ndarray | None) -> tuple[bool | None, bool | None, float]:
         if self._forced is not None:
             v, c = self._forced
             return v, c, (0.9 if v is not None else 0.0)
@@ -81,8 +82,8 @@ class SeatbeltDetector:
         self.vision = SeatbeltVisionAdapter(
             float(self.thresholds.get("belt_detection_confidence", 0.7)))
         self.update_thresholds(self.thresholds)
-        self._absent_start: Optional[float] = None
-        self._bad_start: Optional[float] = None
+        self._absent_start: float | None = None
+        self._bad_start: float | None = None
         self._last_emit: dict[str, float] = {}
 
     def update_thresholds(self, th: dict[str, Any]) -> None:
@@ -99,7 +100,7 @@ class SeatbeltDetector:
     def is_enabled(self) -> bool:
         return bool(getattr(self, "enabled", False))
 
-    def update(self, visible: Optional[bool], correct: Optional[bool] = None,
+    def update(self, visible: bool | None, correct: bool | None = None,
                now: float | None = None) -> list[dict]:
         """Tri-estado: None = no evaluable (sin modelo / sin torso) -> [].
 

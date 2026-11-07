@@ -8,10 +8,10 @@ sin evidencia (no bloquea). Solo stdlib + ``cv2`` si está disponible
 (inyectable para tests sin hardware).
 """
 from __future__ import annotations
+
 import logging
 from pathlib import Path
-from typing import Any, Optional
-
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +87,7 @@ def resolve_evidence_path(data_dir: Path | str | None,
 
 
 def save_event_frame(frame: Any, event_id: str, severity: str | None,
-                     data_dir: Path | str, cv2_module: Any = None) -> Optional[str]:
+                     data_dir: Path | str, cv2_module: Any = None) -> str | None:
     """Guarda 1 frame JPEG. Retorna path RELATIVO o None (nunca lanza).
 
     Retorna ``media/<event_id>.jpg`` (relativo a ``data_dir``, portable entre

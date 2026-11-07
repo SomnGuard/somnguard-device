@@ -1,13 +1,12 @@
 from __future__ import annotations
+
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Optional
 
 import cv2
 import mediapipe as mp
 import numpy as np
-
 
 logger = logging.getLogger(__name__)
 
@@ -65,14 +64,14 @@ class LandmarkDetector:
             )
         except Exception as e:
             raise RuntimeError(f"No se pudo cargar {model_path}: {e}") from e
-        self._latest_result: Optional[mp.tasks.vision.FaceLandmarkerResult] = None
+        self._latest_result: mp.tasks.vision.FaceLandmarkerResult | None = None
         self._initialized = True
         logger.debug("FaceLandmarker inicializado (MediaPipe Tasks API)")
 
     def _result_callback(self, result: mp.tasks.vision.FaceLandmarkerResult, output_image: mp.Image, timestamp_ms: int):
         self._latest_result = result
 
-    async def process(self, frame: np.ndarray) -> Optional[FaceLandmarks]:
+    async def process(self, frame: np.ndarray) -> FaceLandmarks | None:
         if frame is None or frame.size == 0:
             return None
 
@@ -90,7 +89,7 @@ class LandmarkDetector:
                 timeout=2.0,
             )
             self._detect_timeouts = 0
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._detect_timeouts = getattr(self, "_detect_timeouts", 0) + 1
             logger.warning(
                 "MediaPipe sin respuesta %.1fs (racha %d): salto de frame",
@@ -158,7 +157,6 @@ class LandmarkDetector:
             retired.append(old)
             logger.warning("Landmarker viejo jubilado sin cierre (%d jubilados)", len(retired))
         try:
-            import mediapipe as mp
 
             loop = asyncio.get_running_loop()
             self._landmarker = await loop.run_in_executor(None, self._create_landmarker)

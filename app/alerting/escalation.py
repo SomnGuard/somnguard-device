@@ -21,7 +21,6 @@ import time
 
 from app.common.models import AlertCode
 
-
 # Cadena normativa de escalamiento (Apéndice 1: somnolencia leve→crítica).
 ESCALATION_CHAIN: list[AlertCode] = [
     AlertCode.AS_01,

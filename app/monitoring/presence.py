@@ -8,11 +8,11 @@ transiciones vía callback. El callback puede ser sync o async (el manager
 lo ejecuta de forma segura en el loop).
 """
 from __future__ import annotations
+
 import asyncio
 import logging
 import time
-from typing import Callable, Optional
-
+from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -20,12 +20,12 @@ logger = logging.getLogger(__name__)
 class PresenceMonitor:
     def __init__(self, face_absence_timeout_sec: int = 30):
         self.timeout_sec = float(face_absence_timeout_sec)
-        self._last_face_seen_monotonic: Optional[float] = None
+        self._last_face_seen_monotonic: float | None = None
         self._face_present = False
         self._initialized = False
-        self.on_state_change: Optional[Callable[[bool], None]] = None
+        self.on_state_change: Callable[[bool], None] | None = None
 
-    def update(self, face_present: bool) -> Optional[bool]:
+    def update(self, face_present: bool) -> bool | None:
         """Procesa una observación. Retorna la transición (True/False) o None."""
         now = time.monotonic()
         if face_present:
@@ -77,7 +77,7 @@ class PresenceMonitor:
         return self._face_present
 
     @property
-    def seconds_since_face(self) -> Optional[float]:
+    def seconds_since_face(self) -> float | None:
         if self._last_face_seen_monotonic is None:
             return None
         return time.monotonic() - self._last_face_seen_monotonic
