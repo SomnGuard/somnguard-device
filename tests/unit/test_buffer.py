@@ -1,5 +1,4 @@
 """HU-DEVICE-003 AC-001/AC-005: buffer SQLite pending_events."""
-import json
 import time
 
 from app.storage.buffer import EventBuffer

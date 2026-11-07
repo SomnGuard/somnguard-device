@@ -14,7 +14,6 @@ from app.device.backend import (
     _redact_headers,
 )
 
-
 API = "http://backend-test:8000"
 
 

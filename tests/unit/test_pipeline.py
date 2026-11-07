@@ -1,5 +1,6 @@
 """HU-DEVICE-001 IT5: pipeline (AC-005/AC-006) + manager no bloqueante."""
 import asyncio
+
 import numpy as np
 
 from app.analysis.pipeline import VisionPipeline
@@ -26,7 +27,6 @@ def test_pipeline_no_face_no_crash_and_metrics():
         p = VisionPipeline({})
         p.obstruction._landmark_detector = _NoFace()
         # Evitar cargar modelo real: stub ya puesto vía _landmark_detector
-        orig = p.obstruction.process
 
         async def stub_process(frame):
             return await _NoFace().process(frame)
@@ -68,10 +68,11 @@ def test_pipeline_fallback_as09_on_subfailure():
 
 
 def test_manager_handle_result_nonblocking():
+    import time as _t
+
     import app.device.manager as mm
     from app.common.models import DeviceConfig, DeviceIdentity, DeviceState
     from app.monitoring.presence import PresenceMonitor
-    import time as _t
 
     class FakeSound:
         def __init__(self):

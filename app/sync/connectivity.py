@@ -5,11 +5,12 @@ Separado del heartbeat con auth (ADR-005 §3): el healthcheck solo responde
 ¿hay internet? y no actualiza ``last_heartbeat_at``.
 """
 from __future__ import annotations
+
 import asyncio
 import logging
 import time
-from typing import Any, Callable, Optional
-
+from collections.abc import Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -18,11 +19,11 @@ class ConnectivityMonitor:
     """Polling HEAD con callback OFFLINE→ONLINE (dispara sync + reset backoff)."""
 
     def __init__(self, backend: Any, interval_sec: int = 30,
-                 on_online: Optional[Callable[[], Any]] = None):
+                 on_online: Callable[[], Any] | None = None):
         self.backend = backend
         self.interval_sec = max(5, int(interval_sec or 30))
         self.on_online = on_online
-        self.online: Optional[bool] = None
+        self.online: bool | None = None
         self.last_check_monotonic: float = 0.0
 
     async def check_once(self) -> bool:

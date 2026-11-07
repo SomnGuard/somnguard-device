@@ -35,7 +35,25 @@ def test_handle_detection_enqueues_with_uuid_and_telemetry_shape(
         assert ev["event_id"]  # UUID generado
         assert ev["event_type"] == "EV-SOM-02"
         assert ev["severity"] == "MODERADA"
+        assert ev["is_offline_sync"] is True
         assert "has_evidence" in ev
+
+    asyncio.run(scenario())
+
+
+def test_online_detection_is_not_marked_as_offline_sync(monkeypatch, tmp_path):
+    import sys
+    sys.path.insert(0, "tests/unit")
+    from test_manager_states import make_manager
+    mgr, _ = _mgr_with_buffer(monkeypatch, tmp_path, make_manager)
+    mgr.ctx.backend_available = True
+
+    async def scenario():
+        event = {"event_type_id": "EV-SOM-02", "alert_code": "AS-02",
+                 "severity": "MODERADA", "message": "online event"}
+        assert await mgr._enqueue_events([event]) == 1
+        queued = mgr.ctx.buffer.fetch_batch()[0]["event"]
+        assert queued["is_offline_sync"] is False
 
     asyncio.run(scenario())
 

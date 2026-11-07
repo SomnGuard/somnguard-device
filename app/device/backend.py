@@ -26,14 +26,14 @@ Contratos implementados (HU-API-006 + HU-API-005/ADR-011 + HU-API-007/ADR-005):
 Seguridad: ningún secreto se loguea (valores reemplazados por ``***``).
 """
 from __future__ import annotations
+
 import asyncio
 import json
 import logging
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Optional
-
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,7 @@ def _redact_headers(headers: dict[str, str]) -> dict[str, str]:
 
 
 def _do_request(method: str, url: str, headers: dict[str, str],
-               payload: Optional[dict], timeout_sec: float) -> HttpResult:
+               payload: dict | None, timeout_sec: float) -> HttpResult:
     data = None
     body_headers = dict(headers)
     if payload is not None:
@@ -154,7 +154,7 @@ class BackendClient:
             raise BackendError(f"heartbeat respondió {result.status}")
         return result.body
 
-    def fetch_config_sync(self, device_id: str, api_key: str) -> Optional[dict]:
+    def fetch_config_sync(self, device_id: str, api_key: str) -> dict | None:
         try:
             result = _do_request(
                 "GET", self._url(f"/devices/{device_id}/config"),
@@ -177,7 +177,7 @@ class BackendClient:
         return result.body
 
     # -- HU-DEVICE-005: streaming en vivo (poll fase 1; WS fase 2) ------
-    def get_stream_session_sync(self, device_id: str, api_key: str) -> Optional[dict]:
+    def get_stream_session_sync(self, device_id: str, api_key: str) -> dict | None:
         """GET /devices/{id}/stream/session (HU-API-012).
 
         200 = hay viewer (wants-view); 404/409 = sin sesión (IDLE).
@@ -241,7 +241,7 @@ class BackendClient:
         }
 
     def upload_evidence_sync(self, device_id: str, api_key: str, event_id: str,
-                             jpg_path: str, checksum_sha256: str) -> Optional[dict]:
+                             jpg_path: str, checksum_sha256: str) -> dict | None:
         """POST /events/{id}/evidence multipart 1 JPG (fase 2, ADR-006).
 
         Retorna body del 201, o ``{"duplicate": True}`` si 409 (ya existe,
@@ -311,15 +311,15 @@ class BackendClient:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: self.heartbeat_sync(*args, **kwargs))
 
-    async def fetch_config(self, *args: Any, **kwargs: Any) -> Optional[dict]:
+    async def fetch_config(self, *args: Any, **kwargs: Any) -> dict | None:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: self.fetch_config_sync(*args, **kwargs))
 
-    async def get_stream_session(self, *args: Any, **kwargs: Any) -> Optional[dict]:
+    async def get_stream_session(self, *args: Any, **kwargs: Any) -> dict | None:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: self.get_stream_session_sync(*args, **kwargs))
 
-    def get_detection_sync(self, device_id: str, api_key: str) -> Optional[bool]:
+    def get_detection_sync(self, device_id: str, api_key: str) -> bool | None:
         """GET /devices/{id}/stream/detection (pausa manual del portal).
 
         200 {paused}; error de red -> None (conserva último estado).
@@ -346,7 +346,7 @@ class BackendClient:
                     return bool(data[key])
         return None
 
-    async def get_detection(self, *args: Any, **kwargs: Any) -> Optional[bool]:
+    async def get_detection(self, *args: Any, **kwargs: Any) -> bool | None:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: self.get_detection_sync(*args, **kwargs))
 
@@ -358,7 +358,7 @@ class BackendClient:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: self.post_events_sync(*args, **kwargs))
 
-    async def upload_evidence(self, *args: Any, **kwargs: Any) -> Optional[dict]:
+    async def upload_evidence(self, *args: Any, **kwargs: Any) -> dict | None:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: self.upload_evidence_sync(*args, **kwargs))
 

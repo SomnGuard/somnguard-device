@@ -9,7 +9,7 @@ from app.common.config import (
     load_default_config,
     resolve_alert_code,
 )
-from app.common.models import AlertCode, DEFAULT_VOLUME_SCALE
+from app.common.models import DEFAULT_VOLUME_SCALE, AlertCode
 
 
 # -- AC-001: event_sound_map remoto con fallback local -----------------------
@@ -138,10 +138,10 @@ def test_ac004_priority_orders_but_keeps_fifo_on_tie():
 
 # -- Integración manager: override + escalamiento llegan al sonido -----------
 def test_manager_applies_map_and_escalation():
-    import time as _time
     from types import SimpleNamespace
-    from app.device.manager import DeviceManager, DeviceContext
-    from app.common.models import DeviceConfig, DeviceIdentity, DeviceState
+
+    from app.common.models import DeviceIdentity
+    from app.device.manager import DeviceContext, DeviceManager
     from app.monitoring.presence import PresenceMonitor
 
     class FakeSound:

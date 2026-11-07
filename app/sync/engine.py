@@ -9,14 +9,14 @@
   (best-effort, 409 = ya existe → no reintentar).
 """
 from __future__ import annotations
+
 import asyncio
 import hashlib
 import logging
 import random
 import time
 from pathlib import Path
-from typing import Any, Optional
-
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ def compute_backoff_sec(attempt: int, base_sec: int = BACKOFF_BASE_SEC,
     return int(min(max_sec, delay + jitter))
 
 
-def sha256_file(path: str | Path) -> Optional[str]:
+def sha256_file(path: str | Path) -> str | None:
     try:
         h = hashlib.sha256()
         with open(path, "rb") as f:

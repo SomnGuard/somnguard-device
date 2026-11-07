@@ -5,6 +5,7 @@ import time
 import pytest
 
 import app.device.manager as manager_mod
+from app.capture.camera import CameraError
 from app.common.models import AlertCode, DeviceConfig, DeviceIdentity, DeviceState
 from app.device.backend import BackendAuthError, BackendClient, BackendError
 from app.device.manager import (
@@ -12,7 +13,6 @@ from app.device.manager import (
     DeviceContext,
     DeviceManager,
 )
-from app.capture.camera import CameraError
 from app.monitoring.presence import PresenceMonitor
 
 

@@ -1,10 +1,12 @@
 from __future__ import annotations
-import os
+
 import json
+import os
+import urllib.parse
 from pathlib import Path
 from typing import Any
-from .models import DEFAULT_VOLUME_SCALE, DeviceConfig, SoundPattern, AlertCode
 
+from .models import DEFAULT_VOLUME_SCALE, AlertCode, DeviceConfig, SoundPattern
 
 DEFAULT_CONFIG_PATH = Path(__file__).parent.parent.parent / "config" / "device.default.json"
 
@@ -29,7 +31,7 @@ REMOTE_CONFIG_KEYS = frozenset({
 
 
 def load_default_config() -> DeviceConfig:
-    with open(DEFAULT_CONFIG_PATH, "r", encoding="utf-8") as f:
+    with open(DEFAULT_CONFIG_PATH, encoding="utf-8") as f:
         data = json.load(f)
     return _parse_config(data)
 
@@ -84,8 +86,15 @@ def load_env_config() -> dict[str, Any]:
     existe; las variables del sistema tienen prioridad sobre el archivo.
     """
     load_dotenv()
-    api_url = os.getenv("SOMNGUARD_API_URL", "http://localhost:8000").strip().rstrip("/")
+    environment = os.getenv("SOMNGUARD_ENV", "production").strip().lower()
+    api_url = os.getenv("SOMNGUARD_API_URL", "https://api.somnguard.tech").strip().rstrip("/")
+    parsed_url = urllib.parse.urlparse(api_url)
+    if parsed_url.scheme not in {"https", "http"} or not parsed_url.netloc:
+        raise ValueError("SOMNGUARD_API_URL debe ser una URL HTTP(S) válida")
+    if parsed_url.scheme == "http" and environment != "development":
+        raise ValueError("SOMNGUARD_API_URL requiere HTTPS fuera del entorno development")
     return {
+        "environment": environment,
         "api_url": api_url,
         "api_key": os.getenv("SOMNGUARD_API_KEY", ""),
         "device_id": os.getenv("SOMNGUARD_DEVICE_ID", ""),
@@ -100,7 +109,7 @@ def load_env_config() -> dict[str, Any]:
 
 def api_base_url(env_config: dict[str, Any] | None = None) -> str:
     env = env_config or load_env_config()
-    return str(env.get("api_url", "http://localhost:8000")).rstrip("/")
+    return str(env.get("api_url", "https://api.somnguard.tech")).rstrip("/")
 
 
 def redact_secrets(data: dict[str, Any]) -> dict[str, Any]:
@@ -479,7 +488,7 @@ def load_local_override(base: DeviceConfig, data_dir: Path | None = None) -> Dev
     if not override_path.exists():
         return base
     try:
-        with open(override_path, "r", encoding="utf-8") as f:
+        with open(override_path, encoding="utf-8") as f:
             override = json.load(f)
         merged, _ = apply_remote_config(base, override)
         return merged
@@ -500,7 +509,7 @@ def load_cached_remote(base: DeviceConfig, data_dir: Path | None = None) -> Devi
     if not cache_path.exists():
         return base
     try:
-        with open(cache_path, "r", encoding="utf-8") as f:
+        with open(cache_path, encoding="utf-8") as f:
             cached = json.load(f)
     except (OSError, ValueError):
         return base

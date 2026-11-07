@@ -1,9 +1,9 @@
 """HU-DEVICE-001 IT2: EAR/MAR + somnolencia (AC-001/AC-002). Sin hardware."""
 import numpy as np
 
-from app.analysis.ear_mar import TiltEstimator, eye_aspect_ratio, mouth_aspect_ratio, PerclosTracker
-from app.analysis.somnolence import SomnolenceDetector
+from app.analysis.ear_mar import PerclosTracker, TiltEstimator, eye_aspect_ratio, mouth_aspect_ratio
 from app.analysis.severity import EVENT_TABLE
+from app.analysis.somnolence import SomnolenceDetector
 
 
 def _eye(open_: bool = True):
