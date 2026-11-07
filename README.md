@@ -31,6 +31,7 @@ git clone <url> SomnGuard; cd SomnGuard\00-repos\somnguard-device
 cd somnguard-device
 py -m venv .venv; .\.venv\Scripts\activate
 py -m pip install -U pip
+pip install -e ".[stream]"
 pip install opencv-python numpy mediapipe pytest pytest-asyncio
 # httpx opcional: el device usa urllib (stdlib)
 ```
