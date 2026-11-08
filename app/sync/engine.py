@@ -99,12 +99,13 @@ class SyncEngine:
         self._next_retry_monotonic = 0.0
 
     async def sync_once(self, device_id: str, api_key: str,
-                        retention_days: int = 7) -> dict:
+                        retention_days: int = 7, *, serial_number: str = "") -> dict:
         """Un ciclo: batch → POST → limpieza. Nunca lanza (retorna dict)."""
         if not self._backoff_ready():
             return {"synced": 0, "failed": 0, "skipped_backoff": True}
         try:
-            batch = await self._fetch()
+            local_device_id = f"local-{serial_number}" if serial_number else ""
+            batch = await self._fetch(device_id=device_id, local_device_id=local_device_id)
         except Exception as e:
             logger.debug("Sync fetch fallido: %s", e)
             return {"synced": 0, "failed": 0, "error": str(e)}
@@ -177,12 +178,13 @@ class SyncEngine:
             logger.warning("Sync lote fallido (%d eventos): %s", len(ids), e)
             return {"synced": 0, "failed": len(ids), "error": str(e)}
 
-    async def _fetch(self) -> list[dict]:
+    async def _fetch(self, *, device_id: str, local_device_id: str) -> list[dict]:
+        scope = {"device_id": device_id, "local_device_id": local_device_id}
         if hasattr(self.buffer, "afetch_batch"):
-            return await self.buffer.afetch_batch(self.batch_limit)
+            return await self.buffer.afetch_batch(self.batch_limit, **scope)
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
-            None, lambda: self.buffer.fetch_batch(self.batch_limit))
+            None, lambda: self.buffer.fetch_batch(self.batch_limit, **scope))
 
     def _delete_evidence_files(self, batch: list[dict], confirmed: list[str]) -> None:
         ok = set(confirmed)
