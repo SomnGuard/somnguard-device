@@ -6,7 +6,7 @@ Tabla ``pending_events`` (ADR-005 + ADR-004):
 - ``event_json`` TEXT NOT NULL (evento serializado)
 - ``evidence_path`` TEXT NULL (RELATIVO portable ``media/<id>.jpg``; los
   absolutos legacy ``C:/.../data/media/<id>.jpg`` se migran al leer/escribir)
-- ``status`` TEXT PENDING/SENDING/ACKED/FAILED
+- ``status`` TEXT PENDING/SENDING/ACKED/FAILED/QUARANTINED
 - ``retries`` INTEGER DEFAULT 0
 - ``created_at`` / ``updated_at`` ISO UTC
 
@@ -288,10 +288,14 @@ class EventBuffer:
         return removed
 
     # -- reads ---------------------------------------------------------
-    def fetch_batch(self, limit: int = 100) -> list[dict[str, Any]]:
-        """Lote PENDING más antiguos (ORDER BY created_at ASC). Excluye FAILED."""
+    def fetch_batch(self, limit: int = 100, *, device_id: str = "",
+                    local_device_id: str = "") -> list[dict[str, Any]]:
+        """Lee el lote pendiente más antiguo. Para sync, reconcilia su identidad."""
         try:
             with self._connect() as conn:
+                if device_id:
+                    conn.execute("BEGIN IMMEDIATE")
+                    self._reconcile_for_sync(conn, device_id, local_device_id)
                 rows = conn.execute(
                     "SELECT id, event_json, evidence_path, retries, created_at"
                     " FROM pending_events WHERE status='PENDING'"
@@ -315,6 +319,34 @@ class EventBuffer:
                 "created_at": r["created_at"],
             })
         return out
+
+    @staticmethod
+    def _reconcile_for_sync(conn: sqlite3.Connection, device_id: str, local_device_id: str) -> None:
+        # La migración y la lectura comparten transacción para que un evento
+        # encolado durante el registro no se envíe con la identidad anterior.
+        now = _utcnow_iso()
+        if local_device_id and local_device_id != device_id:
+            rebound = conn.execute(
+                """UPDATE pending_events
+                   SET event_json=json_set(event_json, '$.device_id', ?),
+                       status='PENDING', retries=0, updated_at=?
+                   WHERE status IN ('PENDING', 'FAILED')
+                     AND CASE WHEN json_valid(event_json)
+                              THEN json_extract(event_json, '$.device_id') END = ?""",
+                (device_id, now, local_device_id),
+            ).rowcount
+            if rebound:
+                logger.info("Eventos recuperados de la identidad local: %d", rebound)
+        quarantined = conn.execute(
+            """UPDATE pending_events
+               SET status='QUARANTINED', updated_at=?
+               WHERE status='PENDING'
+                 AND CASE WHEN json_valid(event_json)
+                          THEN json_extract(event_json, '$.device_id') END IS NOT ?""",
+            (now, device_id),
+        ).rowcount
+        if quarantined:
+            logger.warning("Eventos apartados por identidad de dispositivo inválida: %d", quarantined)
 
     def count_pending(self) -> int:
         try:
