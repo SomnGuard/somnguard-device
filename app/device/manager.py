@@ -1038,7 +1038,7 @@ class DeviceManager:
         try:
             res = await eng.sync_once(
                 self.ctx.identity.device_id, self.ctx.identity.api_key,
-                retention_days=retention)
+                retention_days=retention, serial_number=self.ctx.identity.serial_number)
         except Exception as e:
             logger.debug("Sync batch fallido: %s", e)
             return {"synced": 0, "error": str(e)}

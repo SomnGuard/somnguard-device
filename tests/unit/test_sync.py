@@ -1,6 +1,8 @@
 """HU-DEVICE-003 AC-002/003/004/005: sync lote, backoff, dedup, limpieza."""
 import asyncio
 import json
+import sqlite3
+from pathlib import Path
 
 import app.device.backend as backend_mod
 from app.device.backend import BackendClient
@@ -63,8 +65,8 @@ def test_healthcheck_true_false(monkeypatch):
 
 def test_sync_once_cleans_acked_and_duplicates(tmp_path):
     buf = EventBuffer(tmp_path / "t.db")
-    buf.enqueue("a", {"event_id": "a", "event_type": "EV-SOM-02"}, None)
-    buf.enqueue("b", {"event_id": "b", "event_type": "EV-SOM-03"}, None)
+    buf.enqueue("a", {"event_id": "a", "device_id": "dev", "event_type": "EV-SOM-02"}, None)
+    buf.enqueue("b", {"event_id": "b", "device_id": "dev", "event_type": "EV-SOM-03"}, None)
 
     class FakeBackend:
         async def post_events(self, device_id, api_key, events):
@@ -85,7 +87,7 @@ def test_sync_once_cleans_acked_and_duplicates(tmp_path):
 
 def test_sync_failure_increments_retries_and_backoff(tmp_path):
     buf = EventBuffer(tmp_path / "t.db")
-    buf.enqueue("a", {"event_id": "a"}, None)
+    buf.enqueue("a", {"event_id": "a", "device_id": "dev"}, None)
 
     class FailBackend:
         async def post_events(self, *a, **k):
@@ -106,7 +108,8 @@ def test_sync_resolves_relative_evidence_and_deletes(tmp_path):
     jpg = media / "ev-rel.jpg"
     jpg.write_bytes(b"fake-jpg")
     buf = EventBuffer(tmp_path / "t.db")
-    buf.enqueue("ev-rel", {"event_id": "ev-rel", "has_evidence": True}, "media/ev-rel.jpg")
+    buf.enqueue("ev-rel", {"event_id": "ev-rel", "device_id": "dev", "has_evidence": True},
+                "media/ev-rel.jpg")
 
     seen = {}
 
@@ -123,10 +126,52 @@ def test_sync_resolves_relative_evidence_and_deletes(tmp_path):
             assert Path(path) == jpg  # resuelto a <data_dir>/media/...
             return {"evidence_id": "e1"}
 
-    from pathlib import Path
     eng = SyncEngine(buf, FakeBackend(), data_dir=tmp_path)
     res = asyncio.run(eng.sync_once("dev", "k"))
     assert res["synced"] == 1
     assert buf.count_pending() == 0
     assert seen["path"] == str(jpg)
     assert not jpg.exists()  # limpieza tras ACK
+
+
+def test_sync_after_provisioning_recovers_own_events_and_preserves_foreign_data(tmp_path):
+    db_path = tmp_path / "t.db"
+    buffer = EventBuffer(db_path)
+    media = tmp_path / "media"
+    media.mkdir()
+    photo = media / "local.jpg"
+    photo.write_bytes(b"local photo")
+    foreign_photo = media / "foreign.jpg"
+    foreign_photo.write_bytes(b"foreign photo")
+    local = {"event_id": "local", "device_id": "local-camera-1",
+             "occurred_at": "2026-01-01T00:00:00+00:00", "has_evidence": True}
+    buffer.enqueue("local", local, "media/local.jpg")
+    buffer.mark_failed(["local"], max_retries=1)
+    buffer.enqueue("foreign", {"event_id": "foreign", "device_id": "local-camera-2"},
+                   "media/foreign.jpg")
+    buffer.enqueue("corrupt", "{")
+    buffer.enqueue("current", {"event_id": "current", "device_id": "registered"})
+
+    class Backend:
+        async def post_events(self, device_id, api_key, events):
+            assert device_id == "registered"
+            assert events == [dict(local, device_id="registered"),
+                              {"event_id": "current", "device_id": "registered"}]
+            return {"acked_ids": ["local", "current"]}
+
+        async def upload_evidence(self, device_id, api_key, event_id, path, checksum):
+            assert event_id == "local"
+            assert Path(path).read_bytes() == b"local photo"
+            return {"evidence_id": "evidence"}
+
+    # Simula un reinicio después de guardar las credenciales y antes del primer envío.
+    engine = SyncEngine(EventBuffer(db_path), Backend(), data_dir=tmp_path)
+    result = asyncio.run(engine.sync_once("registered", "key", serial_number="camera-1"))
+    assert result["synced"] == 2
+    assert not photo.exists()
+    assert foreign_photo.exists()
+    assert asyncio.run(engine.sync_once("registered", "key", serial_number="camera-1"))["empty"]
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT id, status FROM pending_events ORDER BY id").fetchall() == [
+            ("corrupt", "QUARANTINED"), ("foreign", "QUARANTINED"),
+        ]
